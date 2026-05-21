@@ -1,0 +1,30 @@
+# Label catalog used by the classifier.
+#
+# `existing` — labels that already exist in your Gmail. The classifier
+#              will use these where applicable but won't create them.
+# `auto_create` — categories you want for important emails. The classifier
+#              will create these labels in your Gmail the first time
+#              they're applied. Each entry has a one-line description
+#              that goes into the LLM prompt to guide classification.
+
+existing:
+  - Taxes
+  - Filed
+  - Notes
+  - Politics
+
+auto_create:
+  Family: "personal correspondence from friends or family members"
+  Receipts: "one-off purchase records: order confirmations, invoices, payment receipts, shipping/tracking, refund confirmations. NOT recurring account statements (use Statements) and NOT insurance bills (use Insurance)"
+  Statements: "recurring monthly/quarterly account statements from banks, credit cards, brokerages, and loan servicers (Chase, USAA, Robinhood, PenFed, etc.) — the periodic statement itself, not individual transaction receipts"
+  Medical: "detailed emails from doctors, hospitals, pharmacies, lab results"
+  Insurance: "insurance policies, premium bills, claim updates, and EOBs (explanation of benefits) — auto, home, life, and health insurance"
+  School: "emails from schools, teachers, educational institutions, and tuition platforms"
+  Daycare: "daycare/childcare provider notes, photos, billing, and kid-tracking apps (Tadpoles, Brightwheel, etc.)"
+  Sports: "league registrations, team schedules, coach updates, sports event tickets"
+  Organizations: "community groups, professional associations, volunteer organizations you're a member of"
+  Veterans: "VA communications, military service records, and veterans-organization emails"
+  Government: "emails from government offices (DMV, tax authorities, immigration, voter, etc.)"
+  Travel: "flight, train, hotel, and car-rental itineraries, boarding passes, and trip reservation confirmations"
+  Registrations: "event registration confirmations, account creation confirmations, program enrollments"
+  Subscriptions: "subscription renewal notifications and plan-change notices for recurring services"

@@ -1,0 +1,900 @@
+{
+  "id": "ba3cc552-2834-4085-b222-76a62e9f6379",
+  "name": "Gmail cleanup",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 3 * * 6"
+            }
+          ]
+        }
+      },
+      "id": "n-schedule",
+      "name": "Weekly schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "gmail-cleanup-rechain",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "n-webhook",
+      "name": "Re-chain webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        480
+      ],
+      "webhookId": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Clear cross-batch accumulator at start of run\nconst sd = $getWorkflowStaticData('global');\nsd.runResults = [];\nreturn [{ json: {\"perRunLimit\": 2000, \"gmailQuery\": \"older_than:30d -label:llm-reviewed\", \"model\": \"qwen3\", \"llmApiUrl\": \"http://localhost:11434/v1/chat/completions\", \"ntfyTopic\": \"change-me-to-a-private-topic\", \"rulesMd\": \"# Email classification rules\\n\\nYou are an email triage assistant. For each email, decide one of:\\n\\n1. **KEEP** with a label from the catalog (preserves the email and tags it)\\n2. **TRASH** (moves to Gmail's trash, recoverable for 30 days)\\n\\n## What to KEEP\\n\\nEmails worth preserving:\\n\\n- **Family / friends correspondence** \\u2014 personal messages from individuals\\n  (not from a company's domain). Examples: gmail.com, outlook.com, etc.\\n  addresses where the From: looks like a real person's name.\\n- **Receipts** \\u2014 one-off purchase records: order confirmations,\\n  invoices, shipping notifications with tracking, payment receipts,\\n  refund confirmations, tax documents.\\n  **NOTE:** the sender being a financial company (Vanguard, Robinhood,\\n  Fidelity, etc.) does NOT make the email a receipt. Educational /\\n  newsletter content from those providers \\u2014 \\\"Make sure your heart's in\\n  the right place\\\", \\\"5 things to know about your IRA\\\", \\\"Market update\\\"\\n  \\u2014 is MARKETING and should be TRASHED. Only actual transactional\\n  records qualify.\\n- **Statements** \\u2014 recurring periodic account statements from banks,\\n  credit cards, brokerages, and loan servicers (\\\"Your statement is\\n  available\\\", monthly/quarterly statement notices, dividend notices,\\n  contribution confirmations). These are distinct from `Receipts`:\\n  Receipts are one-off purchases, Statements are the recurring\\n  account record.\\n- **Medical** \\u2014 appointment confirmations, lab results, pharmacy\\n  notifications, detailed messages from healthcare providers (NOT\\n  generic health-tip newsletters).\\n- **Insurance** \\u2014 insurance policies, premium bills, claim status\\n  updates, and EOBs (explanation of benefits) \\u2014 auto, home, life, and\\n  health. Insurance bills go here, NOT in `Receipts`; health EOBs go\\n  here, NOT in `Medical`.\\n- **School / educational** \\u2014 emails from schools, teachers, university\\n  registrars, tuition platforms (NOT educational marketing or course\\n  promotions).\\n- **Sports** \\u2014 league registrations, team schedules, coach updates,\\n  sports event tickets you bought (NOT sports news/commentary newsletters).\\n- **Community / professional organizations** you are personally a\\n  member of \\u2014 only **actionable** communications: board emails, meeting\\n  notices, dues invoices, RSVP confirmations, voting / election\\n  notices. **Generic newsletters and \\\"what's happening this month\\\"\\n  digests should be TRASHED even from organizations you belong to** \\u2014\\n  they're informational content already consumed, not records to\\n  preserve. Marketing from organizations you don't belong to is also\\n  trash.\\n- **Government** \\u2014 communications from DMV, tax authorities (IRS, state),\\n  immigration, voter registration, courts, social security, etc.\\n- **Registrations and confirmations** \\u2014 event tickets, account creation\\n  confirmations, program enrollment confirmations, RSVP confirmations.\\n- **Account security** \\u2014 verification codes, security alerts, password\\n  reset notifications **only if recent (under ~30 days)**. See the\\n  Metadata signals section below \\u2014 old sign-in/verification notices\\n  have no archival value and are clutter, not records.\\n\\n## What to TRASH\\n\\n- **Marketing emails** \\u2014 retail sales, \\\"X% off\\\", new product announcements,\\n  newsletters from companies you've bought from but didn't subscribe to a\\n  newsletter intentionally.\\n- **Political email of any kind** \\u2014 fundraising, campaign updates, rally\\n  notices, voter mobilization, advocacy, \\\"this should scare every\\n  Democrat/Republican\\\" rhetoric, candidate newsletters. TRASH all of it\\n  regardless of party. **Do NOT apply the existing `Politics` label**\\n  to any email \\u2014 that label exists for historical reasons but new\\n  political mail goes to trash. The only exceptions are:\\n  - **Donation receipts** \\u2014 if the email confirms a specific donation\\n    you made (amount, date, candidate/PAC name) \\u2192 KEEP as `Receipts`.\\n  - **Voter / election registration confirmations** \\u2014 KEEP as\\n    `Government`.\\n- **Automated social media** \\u2014 LinkedIn job alerts, LinkedIn endorsement\\n  notices, Facebook/Twitter/Instagram digest emails, \\\"people you may know.\\\"\\n- **Substack / Medium / Beehiiv newsletters** \\u2014 even if you subscribed,\\n  these are content you've already consumed; they don't need preservation.\\n- **Real-estate alerts** \\u2014 daily listing emails, property price-drop alerts,\\n  short-term rental investment alerts.\\n- **Feedback request emails** \\u2014 \\\"How did we do?\\\" surveys, NPS surveys,\\n  product review requests.\\n- **Generic newsletters and news digests** \\u2014 Boston Globe headlines, NYT\\n  cooking, ADDitude magazine, The Athletic, sports-news / sports-commentary\\n  emails, \\\"breaking news\\\" alerts, daily-digest emails of any kind. These\\n  are informational, not actionable, not personal. TRASH them even when\\n  the sender is a well-known publication \\u2014 a recognizable brand name does\\n  NOT make a newsletter worth keeping.\\n- **Job alerts** \\u2014 automated job-board emails (LinkedIn Job Alerts, Indeed,\\n  ZipRecruiter, Lensa, Glassdoor, etc.). TRASH these even when they list\\n  real companies and real-sounding roles \\u2014 the listing of legitimate jobs\\n  does NOT make the email a record worth keeping. The ONLY exception is an\\n  email that references a specific application *you submitted* (an ATS\\n  confirmation like \\\"We received your application for <role>\\\"), which is a\\n  weak KEEP as `Registrations`.\\n- **USPS Informed Delivery / mail-arrival summaries** \\u2014 daily auto-generated\\n  digests of physical mail arriving at the house. Transient by nature, no\\n  long-term value. TRASH.\\n- **Recurring digests** \\u2014 daily/weekly emails like \\\"Today's Events\\\",\\n  \\\"Daily Digest\\\", \\\"Weekly Roundup\\\", \\\"X new posts since\\u2026\\\", VetTix-style\\n  \\\"N new events / discounts for you\\\". These have no archival value once\\n  old, **EVEN IF the subject references registrations-worthy events,\\n  organizations you support, or veterans-related programming**. The\\n  digest itself is automated content already consumed.\\n- **Promotional emails wearing transactional clothing** \\u2014 subjects like\\n  \\\"Your Receipt Is Here: Claim Valuable New Coupons!\\\" or \\\"Your balance\\n  transfer offer ends soon\\\" are STILL marketing. Look at the snippet\\n  and `List-Unsubscribe` signal: if the body is selling something and\\n  there's a `List-Unsubscribe: yes` flag, it's trash regardless of the\\n  receipt-sounding subject.\\n- **Old social-network reply notifications** \\u2014 Reddit replies, Nextdoor\\n  comments, Quora answer notifications, Facebook reply digests. The\\n  snippet often quotes the original post and *looks* personal, but the\\n  email itself is automated. TRASH regardless of how personal the\\n  snippet reads.\\n\\n## Decision principles\\n\\n- **When in doubt, KEEP.** Trashing an important email is much worse than\\n  keeping a marginal one. Borderline cases default to KEEP with the\\n  closest matching label. **EXCEPTION:** this does NOT apply to the\\n  categories explicitly listed under \\\"What to TRASH\\\" above \\u2014 marketing,\\n  political mail, news/newsletter digests, job alerts, social-media\\n  digests, and feedback requests are TRASH even when they look borderline\\n  or come from a recognizable brand. Reserve \\\"when in doubt, KEEP\\\" for\\n  emails that don't clearly fit any TRASH category.\\n- **A recognizable brand or real domain is not a reason to keep.**\\n  Marketing from Amazon is still marketing; a newsletter from a major\\n  newspaper is still a newsletter; a job alert listing real companies is\\n  still a job alert. Judge the email by what it *is*, not by whether the\\n  sender is legitimate.\\n- **Personal > automated.** If the From: looks like a real human writing\\n  to you specifically (not a templated mass email), almost always KEEP.\\n- **Transactions > marketing.** Anything that records a financial,\\n  legal, or governmental action you took should be KEPT. Anything trying\\n  to sell you something new can be trashed.\\n- **Old promotional emails are extra trashable.** A sale that ended\\n  6 months ago is just clutter.\\n- **Verification codes and one-time passwords: KEEP only if recent\\n  (under ~30 days), TRASH if old.** They have transient value during\\n  the sign-in moment and no archival value years later. See Metadata\\n  signals.\\n- **Don't reach for a catch-all label.** If no specific label in the\\n  catalog clearly fits a kept email, prefer TRASH over assigning a\\n  generic \\\"Notes\\\" / \\\"Misc\\\" label. Catch-all labels become overflow\\n  buckets full of noise.\\n\\n## Metadata signals\\n\\nEach email may include two extra fields beyond From / Subject / Snippet:\\n\\n- **`Age: N days`** \\u2014 how long ago the message was received.\\n- **`List-Unsubscribe: yes`** \\u2014 RFC 2369 header indicating bulk /\\n  automated mail. Personal email essentially never has this; marketing,\\n  newsletters, and automated notifications almost always do.\\n\\nUse them like this:\\n\\n- **`List-Unsubscribe: yes` is a strong \\\"this is automated\\\" signal.**\\n  Combined with a sender that isn't a person you know, lean toward\\n  trash unless the subject indicates a real transaction (receipt,\\n  shipping, statement, payment, appointment, registration confirmation).\\n- **Time-sensitive notifications (sign-in alerts, verification codes,\\n  \\\"new device\\\", access alerts) are TRASH if `Age > 30 days`.** They\\n  were useful at arrival; once old they're pure noise.\\n- **Recurring digests are TRASH regardless of which category they\\n  reference** \\u2014 Age signals they've been consumed already.\\n- **Job alerts with `Age > 30 days` are TRASH** unless the subject\\n  references a specific application you submitted.\\n- **For ambiguous emails**, `List-Unsubscribe: yes` + `Age > 90 days` +\\n  sender from a recognizable brand domain is a very strong \\\"trash\\\"\\n  combination. Personal correspondence from individuals essentially\\n  never matches all three.\\n\", \"existingLabels\": [\"Taxes\", \"Filed\", \"Notes\", \"Politics\"], \"autoCreateLabels\": {\"Family\": \"personal correspondence from friends or family members\", \"Receipts\": \"one-off purchase records: order confirmations, invoices, payment receipts, shipping/tracking, refund confirmations. NOT recurring account statements (use Statements) and NOT insurance bills (use Insurance)\", \"Statements\": \"recurring monthly/quarterly account statements from banks, credit cards, brokerages, and loan servicers (Chase, USAA, Robinhood, PenFed, etc.) \\u2014 the periodic statement itself, not individual transaction receipts\", \"Medical\": \"detailed emails from doctors, hospitals, pharmacies, lab results\", \"Insurance\": \"insurance policies, premium bills, claim updates, and EOBs (explanation of benefits) \\u2014 auto, home, life, and health insurance\", \"School\": \"emails from schools, teachers, educational institutions, and tuition platforms\", \"Daycare\": \"daycare/childcare provider notes, photos, billing, and kid-tracking apps (Tadpoles, Brightwheel, etc.)\", \"Sports\": \"league registrations, team schedules, coach updates, sports event tickets\", \"Organizations\": \"community groups, professional associations, volunteer organizations you're a member of\", \"Veterans\": \"VA communications, military service records, and veterans-organization emails\", \"Government\": \"emails from government offices (DMV, tax authorities, immigration, voter, etc.)\", \"Travel\": \"flight, train, hotel, and car-rental itineraries, boarding passes, and trip reservation confirmations\", \"Registrations\": \"event registration confirmations, account creation confirmations, program enrollments\", \"Subscriptions\": \"subscription renewal notifications and plan-change notices for recurring services\"}, \"validLabels\": [\"Taxes\", \"Filed\", \"Notes\", \"Politics\", \"Family\", \"Receipts\", \"Statements\", \"Medical\", \"Insurance\", \"School\", \"Daycare\", \"Sports\", \"Organizations\", \"Veterans\", \"Government\", \"Travel\", \"Registrations\", \"Subscriptions\"]} }];",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "n-constants",
+      "name": "Constants",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://gmail.googleapis.com/gmail/v1/users/me/labels",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "n-list-labels",
+      "name": "List labels",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        680,
+        200
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "REPLACE_WITH_YOUR_GMAIL_OAUTH2_CREDENTIAL_ID",
+          "name": "Gmail OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst labels = $json.labels || [];\nconst labelNameToId = {};\nfor (const l of labels) labelNameToId[l.name] = l.id;\nconst reviewedLabelId = labelNameToId['LLM Reviewed'] || null;\nreturn [{ json: { labelNameToId, reviewedLabelId, total: labels.length } }];\n",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "n-label-idx",
+      "name": "Build label index",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "name": "pageToken",
+                    "type": "qs",
+                    "value": "={{ $response.body.nextPageToken }}"
+                  }
+                ]
+              },
+              "completeExpression": "={{ !$response.body.nextPageToken || ($pageCount * 500) >= $('Constants').first().json.perRunLimit }}",
+              "limitPagesFetched": true,
+              "maxRequests": 4
+            }
+          }
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ $('Constants').first().json.gmailQuery }}"
+            },
+            {
+              "name": "maxResults",
+              "value": "={{ Math.min(500, $('Constants').first().json.perRunLimit) }}"
+            }
+          ]
+        }
+      },
+      "id": "n-list-msgs",
+      "name": "List messages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        680,
+        400
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "REPLACE_WITH_YOUR_GMAIL_OAUTH2_CREDENTIAL_ID",
+          "name": "Gmail OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst max = $('Constants').first().json.perRunLimit;\nconst ids = [];\nfor (const item of $input.all()) {\n  const msgs = item.json.messages || [];\n  for (const m of msgs) ids.push(m.id);\n  if (ids.length >= max) break;\n}\nreturn ids.slice(0, max).map(id => ({ json: { id } }));\n",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "n-extract-ids",
+      "name": "Extract IDs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://gmail.googleapis.com/gmail/v1/users/me/messages/{{ $json.id }}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=List-Unsubscribe&metadataHeaders=Date",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "n-get-meta",
+      "name": "Get metadata",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1120,
+        400
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "REPLACE_WITH_YOUR_GMAIL_OAUTH2_CREDENTIAL_ID",
+          "name": "Gmail OAuth2"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// runOnceForEachItem mode: return ONE item, not an array\nconst m = $json;\nconst headers = (m.payload && m.payload.headers) || [];\nconst get = (n) => {\n  const h = headers.find(x => x.name.toLowerCase() === n.toLowerCase());\n  return h ? h.value : '';\n};\nconst internalDate = parseInt(m.internalDate || '0', 10);\nconst ageDays = internalDate ? Math.floor((Date.now() - internalDate) / 86400000) : null;\nreturn {\n  json: {\n    id: m.id,\n    threadId: m.threadId,\n    sender: get('From'),\n    subject: get('Subject'),\n    snippet: m.snippet || '',\n    age_days: ageDays,\n    has_list_unsubscribe: !!get('List-Unsubscribe'),\n    labelIds: m.labelIds || [],\n  }\n};\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "n-parse-meta",
+      "name": "Parse metadata",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 20,
+        "options": {}
+      },
+      "id": "n-split",
+      "name": "Batch (20)",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1560,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// Constants from upstream\nconst c = $('Constants').first().json;\nconst rules = c.rulesMd;\nconst existing = c.existingLabels;\nconst autoCreate = c.autoCreateLabels;\n\n// Batch items (one per email). Drop any without an id \u2014 a failed Get metadata\n// fetch (Gmail 404/500) propagates an item with no id; it can't be classified\n// or labeled, and keeping it desyncs ids vs batchEmails in Parse decisions.\nconst batch = $input.all().map(i => i.json).filter(e => e && e.id);\n\nconst labelLines = [];\nfor (const n of existing) labelLines.push(`- \\`${n}\\` (existing)`);\nfor (const [n, d] of Object.entries(autoCreate)) labelLines.push(`- \\`${n}\\` \u2014 ${d}`);\n\nconst emailsBlock = [];\nbatch.forEach((e, idx) => {\n  const meta = [];\n  if (e.age_days != null) meta.push(`Age: ${e.age_days} days`);\n  if (e.has_list_unsubscribe) meta.push('List-Unsubscribe: yes');\n  const metaStr = meta.length ? meta.join('\\n') + '\\n' : '';\n  emailsBlock.push(\n    `## ${idx + 1}. id: ${e.id}\\n` +\n    `From: ${e.sender}\\n` +\n    `Subject: ${e.subject}\\n` +\n    metaStr +\n    `Snippet: ${(e.snippet || '').slice(0, 300)}\\n`\n  );\n});\n\nconst prompt = `${rules.trim()}\n\n# Available labels\n\nWhen \\`action\\` is \\`keep\\`, choose the single best-matching label from this list. If \\`action\\` is \\`trash\\`, set \\`label\\` to \\`null\\`. Pick exactly one label per kept email \u2014 no nesting, no comma-separated values.\n\n${labelLines.join('\\n')}\n\n# Output format\n\nReturn ONLY a JSON object with this exact structure (no prose, no markdown):\n\n\\`\\`\\`json\n{\"decisions\": [\n  {\"id\": \"...\", \"action\": \"keep\", \"label\": \"Receipts\"},\n  {\"id\": \"...\", \"action\": \"trash\", \"label\": null}\n]}\n\\`\\`\\`\n\nThe \\`decisions\\` array must have exactly the same number of entries as input emails, in the same order. Each \\`id\\` must match an input id. Each \\`action\\` is either \\`\"keep\"\\` or \\`\"trash\"\\`. Each \\`label\\` is either one of the labels above (when keeping) or \\`null\\` (when trashing).\n\n# Emails to classify\n\n${emailsBlock.join('\\n')}`;\n\nreturn [{\n  json: {\n    prompt,\n    ids: batch.map(e => e.id),\n    batchEmails: batch,\n  }\n}];\n",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "n-build-prompt",
+      "name": "Build prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Constants').first().json.llmApiUrl }}",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: $('Constants').first().json.model,\n  messages: [{ role: 'user', content: $json.prompt }],\n  response_format: { type: 'json_object' },\n  temperature: 0.2,\n}) }}",
+        "options": {
+          "timeout": 180000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "n-ask-llm",
+      "name": "Ask LLM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2000,
+        400
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst resp = $('Ask LLM').first().json;\nconst batchInfo = $('Build prompt').first().json;\nconst labelIndex = $('Build label index').first().json.labelNameToId;\nconst reviewedLabelId = $('Build label index').first().json.reviewedLabelId;\nconst validLabels = $('Constants').first().json.validLabels;\n\nlet raw = resp.choices?.[0]?.message?.content || '';\nraw = raw.trim();\n// Strip code fences\nif (raw.startsWith('```json')) raw = raw.slice(7);\nif (raw.startsWith('```')) raw = raw.slice(3);\nif (raw.endsWith('```')) raw = raw.slice(0, -3);\nraw = raw.trim();\n\nlet decisions = [];\ntry {\n  const parsed = JSON.parse(raw);\n  if (Array.isArray(parsed.decisions)) decisions = parsed.decisions;\n} catch (e) {\n  // Regex fallback\n  const re = /\\{\\s*\"id\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"action\"\\s*:\\s*\"(keep|trash)\"\\s*,\\s*\"label\"\\s*:\\s*(?:\"([^\"]*)\"|null)\\s*\\}/g;\n  let m;\n  while ((m = re.exec(raw)) !== null) {\n    decisions.push({ id: m[1], action: m[2], label: m[3] ?? null });\n  }\n}\n\n// Validate + plan\nconst inputIds = new Set(batchInfo.ids);\nconst inputById = new Map(batchInfo.batchEmails.map(e => [e.id, e]));\nconst seen = new Set();\nconst plan = [];\nconst errors = [];\n\nfor (const d of decisions) {\n  if (!inputIds.has(d.id)) { errors.push(`unknown id ${d.id}`); continue; }\n  if (seen.has(d.id)) { errors.push(`dup id ${d.id}`); continue; }\n  const action = d.action;\n  if (action !== 'keep' && action !== 'trash') {\n    errors.push(`bad action for ${d.id}: ${action}`);\n    continue;\n  }\n  let label = d.label;\n  if (action === 'keep' && !validLabels.includes(label)) {\n    errors.push(`unknown label for ${d.id}: ${label}`);\n    continue;\n  }\n  if (action === 'trash') label = null;\n  seen.add(d.id);\n  const labelId = label ? labelIndex[label] : null;\n  const em = inputById.get(d.id) || {};\n  plan.push({\n    id: d.id,\n    action,\n    label,\n    labelId,\n    reviewedLabelId,\n    sender: em.sender || '',\n    subject: em.subject || '',\n  });\n}\n\n// Missing IDs default to keep-no-label (safe failure)\nfor (const id of inputIds) {\n  if (!seen.has(id)) {\n    const em = inputById.get(id) || {};\n    plan.push({\n      id, action: 'keep', label: null, labelId: null, reviewedLabelId,\n      sender: em.sender || '',\n      subject: em.subject || '',\n    });\n    errors.push(`missing decision for ${id}, defaulted to keep`);\n  }\n}\n\n// Accumulate decisions across batches for Tally\nconst sd = $getWorkflowStaticData('global');\nif (!sd.runResults) sd.runResults = [];\nfor (const p of plan) sd.runResults.push(p);\n\nreturn plan.map(p => ({ json: { ...p, parseErrors: errors } }));\n",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "n-parse-dec",
+      "name": "Parse decisions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2220,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "trash",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "trash",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "trash"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "keep-with-label",
+                    "leftValue": "={{ $json.labelId }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "string",
+                      "operation": "notEmpty",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "keep"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "skip"
+        }
+      },
+      "id": "n-switch",
+      "name": "Route action",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        2440,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://gmail.googleapis.com/gmail/v1/users/me/messages/{{ $json.id }}/trash",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "n-trash",
+      "name": "Trash message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2660,
+        240
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "REPLACE_WITH_YOUR_GMAIL_OAUTH2_CREDENTIAL_ID",
+          "name": "Gmail OAuth2"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://gmail.googleapis.com/gmail/v1/users/me/messages/{{ $json.id }}/modify",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ addLabelIds: [$('Build label index').first().json.reviewedLabelId] }) }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "n-reviewed-trash",
+      "name": "Mark reviewed (post-trash)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2880,
+        240
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "REPLACE_WITH_YOUR_GMAIL_OAUTH2_CREDENTIAL_ID",
+          "name": "Gmail OAuth2"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://gmail.googleapis.com/gmail/v1/users/me/messages/{{ $json.id }}/modify",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ addLabelIds: [$json.labelId, $json.reviewedLabelId] }) }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "n-modify",
+      "name": "Add label",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2660,
+        440
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "REPLACE_WITH_YOUR_GMAIL_OAUTH2_CREDENTIAL_ID",
+          "name": "Gmail OAuth2"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://gmail.googleapis.com/gmail/v1/users/me/messages/{{ $json.id }}/modify",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ addLabelIds: [$json.reviewedLabelId] }) }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "n-reviewed-skip",
+      "name": "Mark reviewed (skip)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2660,
+        600
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "REPLACE_WITH_YOUR_GMAIL_OAUTH2_CREDENTIAL_ID",
+          "name": "Gmail OAuth2"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {},
+      "id": "n-merge",
+      "name": "Merge actions",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2880,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst sd = $getWorkflowStaticData('global');\nconst items = sd.runResults || [];\nconst perRunLimit = $('Constants').first().json.perRunLimit;\nconst kept = items.filter(x => x.action === 'keep');\nconst trashed = items.filter(x => x.action === 'trash');\nconst byLabel = {};\nfor (const k of kept) {\n  const l = k.label || '(no label)';\n  byLabel[l] = (byLabel[l] || 0) + 1;\n}\nconst labelLines = Object.entries(byLabel)\n  .sort((a, b) => b[1] - a[1])\n  .map(([l, n]) => `  ${l}: ${n}`)\n  .join('\\n');\nconst total = items.length;\n// \"More remain?\" must be judged on how many ids the query returned (pre-filter),\n// NOT on `total`: Build prompt drops id-less emails (failed metadata fetches),\n// so a genuine full batch often yields total slightly under perRunLimit \u2014 using\n// total here wrongly ends the chain with tens of thousands still unprocessed.\nconst idCount = $('Extract IDs').all().length;\nconst moreRemain = idCount >= perRunLimit;\nconst statusLine = moreRemain\n  ? `Backlog not cleared \u2014 re-triggering for the next ${perRunLimit}.`\n  : `Backlog cleared \u2014 nothing left matching the filter.`;\nconst title = `Gmail cleanup: ${kept.length} kept, ${trashed.length} trashed of ${total}`;\nconst body = `Run finished.\\nProcessed: ${total}\\nKept (labeled): ${kept.length}\\nTrashed: ${trashed.length}\\n\\nKept by label:\\n${labelLines || '  (none)'}\\n\\n${statusLine}`;\n// Clear for next run\nsd.runResults = [];\nreturn [{ json: { title, body, total, kept: kept.length, trashed: trashed.length, moreRemain } }];\n",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "n-tally",
+      "name": "Tally",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3100,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// SplitInBatches' \"done\" output re-fires many times at end-of-run (the NoOp\n// loop-merge delivers once per branch). Tally runs each time but only the\n// genuine completion has total>0 \u2014 gate so ntfy sends exactly one notification.\nconst t = $input.first().json;\nreturn (t && t.total > 0) ? [{ json: t }] : [];\n",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "n-ntfy-gate",
+      "name": "ntfy gate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3320,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://ntfy.sh/change-me-to-a-private-topic",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Title",
+              "value": "={{ $json.title }}"
+            },
+            {
+              "name": "X-Priority",
+              "value": "={{ $json.moreRemain ? '2' : '4' }}"
+            },
+            {
+              "name": "X-Tags",
+              "value": "envelope,broom"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "text/plain",
+        "body": "={{ $json.body }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "n-ntfy",
+      "name": "ntfy: summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3540,
+        600
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// n8n skips a node that receives zero input items, so returning [] ends the chain.\n// total>0 is true only on the genuine Tally run (spurious SplitInBatches \"done\"\n// re-fires see cleared runResults => total 0), so this fires Re-trigger exactly\n// once \u2014 and only when the query still has a full batch's worth queued.\nconst t = $input.first().json;\nreturn (t && t.total > 0 && t.moreRemain) ? [{ json: { source: 'rechain' } }] : [];\n",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "n-rechain-gate",
+      "name": "Re-chain gate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3320,
+        780
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:5678/webhook/gmail-cleanup-rechain",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ source: 'rechain' }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "n-retrigger",
+      "name": "Re-trigger next batch",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3540,
+        780
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Weekly schedule": {
+      "main": [
+        [
+          {
+            "node": "Constants",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Constants": {
+      "main": [
+        [
+          {
+            "node": "List labels",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "List messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List labels": {
+      "main": [
+        [
+          {
+            "node": "Build label index",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List messages": {
+      "main": [
+        [
+          {
+            "node": "Extract IDs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract IDs": {
+      "main": [
+        [
+          {
+            "node": "Get metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get metadata": {
+      "main": [
+        [
+          {
+            "node": "Parse metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse metadata": {
+      "main": [
+        [
+          {
+            "node": "Batch (20)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Batch (20)": {
+      "main": [
+        [
+          {
+            "node": "Tally",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build prompt": {
+      "main": [
+        [
+          {
+            "node": "Ask LLM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask LLM": {
+      "main": [
+        [
+          {
+            "node": "Parse decisions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse decisions": {
+      "main": [
+        [
+          {
+            "node": "Route action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route action": {
+      "main": [
+        [
+          {
+            "node": "Trash message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Add label",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark reviewed (skip)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trash message": {
+      "main": [
+        [
+          {
+            "node": "Mark reviewed (post-trash)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark reviewed (post-trash)": {
+      "main": [
+        [
+          {
+            "node": "Merge actions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Add label": {
+      "main": [
+        [
+          {
+            "node": "Merge actions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark reviewed (skip)": {
+      "main": [
+        [
+          {
+            "node": "Merge actions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge actions": {
+      "main": [
+        [
+          {
+            "node": "Batch (20)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tally": {
+      "main": [
+        [
+          {
+            "node": "ntfy gate",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Re-chain gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ntfy gate": {
+      "main": [
+        [
+          {
+            "node": "ntfy: summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Re-chain gate": {
+      "main": [
+        [
+          {
+            "node": "Re-trigger next batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Re-chain webhook": {
+      "main": [
+        [
+          {
+            "node": "Constants",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build label index": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York"
+  }
+}
