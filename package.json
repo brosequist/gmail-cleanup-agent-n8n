@@ -1,0 +1,10 @@
+{
+  "name": "gmail-cleanup-agent-n8n",
+  "version": "1.0.0",
+  "private": true,
+  "description": "LLM-powered Gmail inbox triage as a self-rechaining n8n workflow",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test"
+  }
+}

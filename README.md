@@ -121,11 +121,16 @@ To exempt a message from the LLM entirely, apply `LLM Reviewed` to it by hand.
 ## Repository layout
 
 ```
-build_workflow.py     Generator — embeds config/ and writes gmail-cleanup.json
-gmail-cleanup.json    The importable n8n workflow (regenerate; do not hand-edit)
+build_workflow.py        Generator — embeds config/ and writes gmail-cleanup.json
+gmail-cleanup.json       The importable n8n workflow (generated; do not hand-edit)
 config/
-  rules.md            Classification rules — the prompt the LLM follows
-  labels.yaml         Label catalog: existing labels + auto-created categories
+  rules.md               Classification rules — the prompt the LLM follows
+  labels.yaml            Label catalog: existing labels + auto-created categories
+tests/
+  test_structure.py      Structural tests for the workflow graph (pytest)
+  codenodes.test.mjs     Logic tests for the Code nodes (node:test)
+  harness.mjs            Mock n8n runtime used by the Code-node tests
+.github/workflows/ci.yml Runs both test suites on every push and pull request
 ```
 
 `gmail-cleanup.json` is **generated**. Edit `config/` or `build_workflow.py`
@@ -217,6 +222,33 @@ A few non-obvious choices, documented so they are not "fixed" by accident:
   prompt from the decision parser.
 - **Notification failure is non-fatal.** The `ntfy` node continues on error — a
   missed push notification never breaks the run or the chain.
+
+## Tests
+
+Two suites guard core functionality so a future change cannot quietly break it:
+
+- **`tests/test_structure.py`** (pytest) — verifies the generator runs, the
+  committed `gmail-cleanup.json` is up to date, every connection resolves to a
+  real node, the batch loop and re-chain wiring are intact, the config is
+  embedded correctly, and no environment-specific values leak in.
+- **`tests/codenodes.test.mjs`** (`node:test`) — runs the *actual* JavaScript
+  from each Code node in `gmail-cleanup.json` against a mock n8n runtime. It
+  covers prompt building, decision parsing and validation, the tally, and the
+  re-chain/notification gates — including explicit regression tests for the
+  three bugs found while bringing the workflow up.
+
+Run them locally:
+
+```bash
+pip install -r requirements-dev.txt
+python build_workflow.py     # regenerate before testing
+pytest -q                    # structural tests
+node --test                  # Code-node logic tests   (or: npm test)
+```
+
+[GitHub Actions](.github/workflows/ci.yml) runs both suites on every push and
+pull request. **Regenerate `gmail-cleanup.json` and commit it** whenever you
+change `build_workflow.py` or anything in `config/` — CI fails if it is stale.
 
 ## License
 

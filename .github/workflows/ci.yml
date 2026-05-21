@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Regenerate workflow JSON
+        run: python build_workflow.py
+
+      - name: Fail if gmail-cleanup.json was not committed up to date
+        run: git diff --exit-code gmail-cleanup.json
+
+      - name: Structural tests (pytest)
+        run: pytest -q
+
+      - name: Code-node logic tests (node:test)
+        run: node --test

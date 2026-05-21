@@ -1,0 +1,4 @@
+# Development + test dependencies.
+# pyyaml is also a runtime dependency of build_workflow.py.
+pyyaml
+pytest

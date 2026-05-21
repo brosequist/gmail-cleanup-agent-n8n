@@ -5,7 +5,6 @@ Run `python build_workflow.py` after editing the configuration below or the
 files in config/. It writes gmail-cleanup.json, which you import into n8n.
 """
 import json
-import uuid
 from pathlib import Path
 
 # ─── Configuration ──────────────────────────────────────────────────────────
@@ -45,7 +44,9 @@ SCHEDULE_CRON = "0 3 * * 6"   # Saturdays at 03:00
 TIMEZONE      = "America/New_York"
 
 RECHAIN_WEBHOOK_PATH = "gmail-cleanup-rechain"
-WORKFLOW_ID = str(uuid.uuid4())
+# Fixed so the generated JSON is deterministic (CI checks it for drift).
+# n8n assigns its own ID on import; this value is just a stable placeholder.
+WORKFLOW_ID = "gmail-cleanup-n8n0"
 
 # ─────────────────────────────────────────────────────────────────────────────
 
