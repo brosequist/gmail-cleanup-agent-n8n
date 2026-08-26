@@ -433,6 +433,15 @@ nodes.append(http_node("List messages", "n-list-msgs", "GET",
                     {"name": "pageToken", "type": "qs", "value": "={{ $response.body.nextPageToken }}"}
                 ]
             },
+            # n8n only evaluates completeExpression when paginationCompleteWhen
+            # is "other". Left at its default ("responseIsEmpty") the expression
+            # is ignored, and since Gmail's response is never empty the node just
+            # re-requests page 1 forever. Harmless while the backlog exceeded 500
+            # messages (every page carried a real nextPageToken, so maxRequests
+            # capped the run), fatal once it fit in a single page: every response
+            # became identical and n8n's identical-response guard aborted the
+            # node. Broke the daily run 2026-08-25/26.
+            "paginationCompleteWhen": "other",
             "completeExpression": "={{ !$response.body.nextPageToken || ($pageCount * 500) >= $('Constants').first().json.perRunLimit }}",
             "limitPagesFetched": True,
             "maxRequests": 4,

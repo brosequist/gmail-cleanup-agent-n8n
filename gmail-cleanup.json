@@ -122,6 +122,7 @@
                   }
                 ]
               },
+              "paginationCompleteWhen": "other",
               "completeExpression": "={{ !$response.body.nextPageToken || ($pageCount * 500) >= $('Constants').first().json.perRunLimit }}",
               "limitPagesFetched": true,
               "maxRequests": 4
