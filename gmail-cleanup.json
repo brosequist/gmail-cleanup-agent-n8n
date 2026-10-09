@@ -81,7 +81,10 @@
           "id": "REPLACE_WITH_YOUR_GMAIL_OAUTH2_CREDENTIAL_ID",
           "name": "Gmail OAuth2"
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 3000
     },
     {
       "parameters": {
@@ -156,7 +159,10 @@
           "id": "REPLACE_WITH_YOUR_GMAIL_OAUTH2_CREDENTIAL_ID",
           "name": "Gmail OAuth2"
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 3000
     },
     {
       "parameters": {
