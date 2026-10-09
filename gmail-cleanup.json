@@ -26,6 +26,7 @@
       "parameters": {
         "httpMethod": "POST",
         "path": "gmail-cleanup-rechain",
+        "authentication": "headerAuth",
         "responseMode": "onReceived",
         "options": {}
       },
@@ -37,7 +38,13 @@
         240,
         480
       ],
-      "webhookId": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d"
+      "webhookId": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_YOUR_RECHAIN_HEADER_AUTH_CREDENTIAL_ID",
+          "name": "Gmail cleanup re-chain secret"
+        }
+      }
     },
     {
       "parameters": {
@@ -609,6 +616,8 @@
       "parameters": {
         "method": "POST",
         "url": "http://localhost:5678/webhook/gmail-cleanup-rechain",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "contentType": "json",
         "specifyBody": "json",
@@ -625,6 +634,12 @@
         3540,
         780
       ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_YOUR_RECHAIN_HEADER_AUTH_CREDENTIAL_ID",
+          "name": "Gmail cleanup re-chain secret"
+        }
+      },
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 5000,

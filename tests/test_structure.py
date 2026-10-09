@@ -285,6 +285,25 @@ def test_llm_api_key_uses_its_own_header_auth_credential(tmp_path):
     assert others == [n for n in WORKFLOW["nodes"] if n["name"] != "Ask LLM"]
 
 
+def test_rechain_webhook_requires_the_secret_and_retrigger_sends_it():
+    """The webhook used to accept any POST, so anyone who could reach n8n could
+    start a run. Both ends must use the SAME Header Auth credential."""
+    hook = NODES["Re-chain webhook"]
+    assert hook["parameters"]["authentication"] == "headerAuth"
+    send = NODES["Re-trigger next batch"]
+    assert send["parameters"]["authentication"] == "genericCredentialType"
+    assert send["parameters"]["genericAuthType"] == "httpHeaderAuth"
+    assert hook["credentials"] == send["credentials"] == {"httpHeaderAuth": {
+        "id": "REPLACE_WITH_YOUR_RECHAIN_HEADER_AUTH_CREDENTIAL_ID",
+        "name": "Gmail cleanup re-chain secret"}}
+
+
+def test_every_credential_is_a_placeholder():
+    for node in WORKFLOW["nodes"]:
+        for ref in node.get("credentials", {}).values():
+            assert ref["id"].startswith("REPLACE_WITH_YOUR_"), node["name"]
+
+
 # ─── Workflow settings ───────────────────────────────────────────────────────
 
 def test_settings_are_sane():

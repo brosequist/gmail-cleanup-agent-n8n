@@ -20,6 +20,13 @@ OAUTH_CRED_NAME = "Gmail OAuth2"
 # next batch. The in-process default is fine for most single-node installs.
 N8N_BASE_URL = "http://localhost:5678"
 
+# n8n "Header Auth" credential guarding that re-chain webhook. Without it anyone
+# who can reach n8n could start runs. Create it after import with any header
+# name (e.g. X-Rechain-Secret) and a long random value; the webhook checks it
+# and Re-trigger next batch sends it. Placeholder only, like OAUTH_CRED_ID.
+RECHAIN_CRED_ID   = "REPLACE_WITH_YOUR_RECHAIN_HEADER_AUTH_CREDENTIAL_ID"
+RECHAIN_CRED_NAME = "Gmail cleanup re-chain secret"
+
 # Any OpenAI-compatible chat-completions endpoint + model name. Tested with
 # Ollama; also works with llama.cpp, vLLM, LM Studio, or the OpenAI API.
 LLM_API_URL = "http://localhost:11434/v1/chat/completions"
@@ -451,6 +458,7 @@ return (t && t.total > 0) ? [{ json: t }] : [];
 """
 
 OAUTH_CRED_REF = {"oAuth2Api": {"id": OAUTH_CRED_ID, "name": OAUTH_CRED_NAME}}
+RECHAIN_CRED_REF = {"httpHeaderAuth": {"id": RECHAIN_CRED_ID, "name": RECHAIN_CRED_NAME}}
 
 def http_node(name, id_, method, url, position, body=None, body_type=None, query_params=None,
               continue_on_fail=False, pagination=None, response_format=None, retry=False):
@@ -526,11 +534,13 @@ nodes.append({
 # 1b. Re-chain webhook — second trigger. The workflow POSTs this URL at the end
 # of a full batch to start a fresh execution, draining the backlog over many
 # short, crash-safe runs. Deactivating the workflow unregisters this URL, which
-# cleanly stops an in-progress drain.
+# cleanly stops an in-progress drain. Header auth: n8n answers 403 to a caller
+# without the secret, before any node runs.
 nodes.append({
     "parameters": {
         "httpMethod": "POST",
         "path": RECHAIN_WEBHOOK_PATH,
+        "authentication": "headerAuth",
         "responseMode": "onReceived",
         "options": {},
     },
@@ -540,6 +550,7 @@ nodes.append({
     "typeVersion": 2,
     "position": [240, 480],
     "webhookId": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+    "credentials": RECHAIN_CRED_REF,
 })
 
 # 2. Constants (as Code node — Set doesn't handle nested objects cleanly)
@@ -874,13 +885,15 @@ if NTFY_TOPIC:
 # 19. Re-chain gate — emits an item only when more emails remain.
 nodes.append(code_node("Re-chain gate", "n-rechain-gate", RECHAIN_GATE_JS, [3320, 780], runOnce=True))
 
-# 20. Re-trigger — POST the workflow's own webhook to start the next batch.
-# Internal cluster URL: no Authentik, no auth. onError=continue so a 404
-# (workflow deactivated as a kill switch) ends the chain quietly.
+# 20. Re-trigger — POST the workflow's own webhook to start the next batch,
+# sending the re-chain secret. onError=continue so a 404 (workflow deactivated
+# as a kill switch) ends the chain quietly.
 nodes.append({
     "parameters": {
         "method": "POST",
         "url": f"{N8N_BASE_URL}/webhook/{RECHAIN_WEBHOOK_PATH}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
         "sendBody": True,
         "contentType": "json",
         "specifyBody": "json",
@@ -892,6 +905,7 @@ nodes.append({
     "type": "n8n-nodes-base.httpRequest",
     "typeVersion": 4.2,
     "position": [3540, 780],
+    "credentials": RECHAIN_CRED_REF,
     "retryOnFail": True,
     "maxTries": 3,
     "waitBetweenTries": 5000,
