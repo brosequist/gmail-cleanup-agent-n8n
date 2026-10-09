@@ -49,7 +49,10 @@ Two entry points feed the same graph:
   classification rules and label catalog. It also clears the cross-batch
   accumulator held in workflow static data.
 - **List labels → Build label index** — fetches your Gmail labels and builds a
-  name→ID map, including the ID of the `LLM Reviewed` bookkeeping label.
+  name→ID map, including the ID of the `LLM Reviewed` bookkeeping label. If
+  `LLM Reviewed` or any label in your catalog is missing from Gmail, it stops
+  the run here with an error naming them, before any mail is fetched (see
+  [step 3](#3-create-the-gmail-labels)).
 - **List messages** — a paginated Gmail search (default
   `older_than:30d -label:llm-reviewed`) returning up to `PER_RUN_LIMIT`
   message IDs.
@@ -107,8 +110,10 @@ unregisters, the next re-trigger call gets a 404, and the chain stops cleanly.
 
 ## The `LLM Reviewed` label
 
-`LLM Reviewed` is a bookkeeping label the workflow creates and applies to every
-message it touches — kept, trashed, or skipped. The default Gmail search
+`LLM Reviewed` is a bookkeeping label the workflow applies to every message it
+touches — kept, trashed, or skipped. **You create it once in Gmail before the
+first run** ([step 3](#3-create-the-gmail-labels)); the workflow never creates
+labels, and stops before classifying anything if it is missing. The default Gmail search
 excludes it (`-label:llm-reviewed`), which makes the whole system idempotent:
 
 - A message is never classified twice.
@@ -176,7 +181,24 @@ Edit the configuration block at the top of `build_workflow.py`:
 
 Then tune `config/rules.md` and `config/labels.yaml` (see below).
 
-### 3. Generate and import
+### 3. Create the Gmail labels
+
+The workflow **does not create labels**; it only applies labels that already
+exist in your Gmail. Before the first run, create (Gmail → Settings → Labels →
+*Create new label*), with names exactly as written:
+
+- **`LLM Reviewed`**, the bookkeeping label;
+- **every label in `config/labels.yaml`**, both the `existing` and the
+  `auto_create` entries.
+
+If any are missing, the first Code node (*Build label index*) fails the run
+with an error such as `Gmail is missing 2 label(s) this workflow applies:
+"LLM Reviewed", "Receipts"`, and nothing is classified. This is deliberate.
+Gmail silently accepts a label that does not exist, so without the check a
+fresh install would mark nothing as reviewed and re-process the same mail on
+every run while reporting success.
+
+### 4. Generate and import
 
 ```bash
 pip install pyyaml
@@ -187,7 +209,7 @@ Import `gmail-cleanup.json` into n8n (Workflows → Import from File). Open any
 Gmail HTTP node, select your OAuth2 credential — n8n applies it to all of them.
 Save and activate the workflow.
 
-### 4. First run
+### 5. First run
 
 Trigger the workflow manually once ("Execute Workflow"). It will process the
 first `PER_RUN_LIMIT` emails and, if more remain, re-chain automatically until
@@ -201,7 +223,10 @@ the backlog is clear. After that the weekly schedule keeps the inbox tidy.
 - **`config/labels.yaml`** lists the category labels:
   - `existing` — labels already in your Gmail that the model may use.
   - `auto_create` — categories with a one-line description; the model may
-    apply them, and you create the labels in Gmail before the first run.
+    apply them. Despite the name (shared with the companion Python agent, which
+    does create them), this workflow does not: create them in Gmail yourself
+    ([step 3](#3-create-the-gmail-labels)), or the run stops with an error
+    listing the missing ones.
 
 Re-run `python build_workflow.py` after any change.
 
