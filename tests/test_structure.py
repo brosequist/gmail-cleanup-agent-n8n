@@ -94,6 +94,25 @@ def test_both_triggers_enter_the_pipeline_at_constants():
         )
 
 
+def test_missing_label_check_runs_before_any_mail_is_fetched():
+    """Build label index throws when Gmail lacks a label the workflow applies.
+    That only protects the mailbox if it runs BEFORE List messages. Constants
+    fans out to both branches in parallel, so the guarantee rests on n8n's v1
+    execution order (parallel branches run depth-first, top to bottom by
+    canvas position) and on the throw not being swallowed. Moving a node on
+    the canvas, or adding continueOnFail/onError, would silently undo it."""
+    assert WORKFLOW["settings"].get("executionOrder") == "v1"
+    assert set(_targets("Constants")) >= {"List labels", "List messages"}
+    assert _targets("List labels") == ["Build label index"]
+    labels_y = NODES["List labels"]["position"][1]
+    messages_y = NODES["List messages"]["position"][1]
+    assert labels_y < messages_y, "label branch must sit above the message branch"
+    for name in ("List labels", "Build label index"):
+        assert not NODES[name].get("continueOnFail"), name
+        assert NODES[name].get("onError") in (None, "stopWorkflow"), name
+    assert "throw new Error" in NODES["Build label index"]["parameters"]["jsCode"]
+
+
 def test_batch_loop_is_intact():
     # SplitInBatches output 0 = done -> Tally; output 1 = loop -> Build prompt.
     assert _targets("Batch (20)", 0) == ["Tally"]

@@ -248,7 +248,27 @@ LABEL_INDEX_JS = r"""
 const labels = $json.labels || [];
 const labelNameToId = {};
 for (const l of labels) labelNameToId[l.name] = l.id;
-const reviewedLabelId = labelNameToId['LLM Reviewed'] || null;
+const c = $('Constants').first().json;
+const REVIEWED = 'LLM Reviewed';
+
+// Fail loudly, before any message is fetched, if Gmail lacks a label this
+// workflow applies. The workflow never creates labels. Gmail silently accepts
+// addLabelIds:[null] with a 200, so a missing label would no-op every stamp:
+// nothing gets marked LLM Reviewed, the -label:llm-reviewed query never
+// shrinks, and the self-rechaining loop re-processes the same newest mail
+// forever while every run reports success. A missing category label would
+// likewise leave every email in that category unlabelled.
+const needed = [REVIEWED, ...(c.validLabels || [])];
+const missing = needed.filter((n, i) => needed.indexOf(n) === i && !labelNameToId[n]);
+if (missing.length) {
+  throw new Error(
+    `Gmail is missing ${missing.length} label(s) this workflow applies: ` +
+    missing.map(n => `"${n}"`).join(', ') + '. ' +
+    'Create them in Gmail (Settings > Labels > Create new label, names exactly as ' +
+    'written; see the README) and run again. Nothing was classified.');
+}
+
+const reviewedLabelId = labelNameToId[REVIEWED];
 return [{ json: { labelNameToId, reviewedLabelId, total: labels.length } }];
 """
 

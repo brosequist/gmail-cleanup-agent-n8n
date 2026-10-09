@@ -11,22 +11,54 @@ import { runNode } from './harness.mjs';
 
 // ─── Build label index ───────────────────────────────────────────────────────
 
+const LI_CONSTANTS = { Constants: [{ json: { validLabels: ['Taxes', 'Receipts'] } }] };
+
 test('Build label index maps names to IDs and finds LLM Reviewed', () => {
   const out = runNode('Build label index', {
     json: { labels: [
       { name: 'LLM Reviewed', id: 'Label_19' },
       { name: 'Receipts', id: 'Label_5' },
+      { name: 'Taxes', id: 'Label_7' },
     ] },
+    nodes: LI_CONSTANTS,
   });
   assert.equal(out[0].json.reviewedLabelId, 'Label_19');
   assert.equal(out[0].json.labelNameToId.Receipts, 'Label_5');
 });
 
-test('Build label index: reviewedLabelId is null when the label is absent', () => {
-  const out = runNode('Build label index', {
-    json: { labels: [{ name: 'Receipts', id: 'Label_5' }] },
-  });
-  assert.equal(out[0].json.reviewedLabelId, null);
+// Regression: with the label absent, reviewedLabelId used to be null, Gmail
+// accepted addLabelIds [null] with a 200, nothing was stamped, and the
+// self-rechaining loop re-processed the same mail forever while reporting
+// success. It must now stop the run before any message is fetched.
+test('Build label index fails loudly when LLM Reviewed is missing', () => {
+  assert.throws(
+    () => runNode('Build label index', {
+      json: { labels: [{ name: 'Receipts', id: 'Label_5' }, { name: 'Taxes', id: 'Label_7' }] },
+      nodes: LI_CONSTANTS,
+    }),
+    (err) => /missing 1 label\(s\)/.test(err.message) && /"LLM Reviewed"/.test(err.message)
+      && /Nothing was classified/.test(err.message),
+  );
+});
+
+test('Build label index fails loudly when a category label is missing from Gmail', () => {
+  assert.throws(
+    () => runNode('Build label index', {
+      json: { labels: [{ name: 'LLM Reviewed', id: 'Label_19' }, { name: 'Taxes', id: 'Label_7' }] },
+      nodes: LI_CONSTANTS,
+    }),
+    (err) => /"Receipts"/.test(err.message) && !/"Taxes"/.test(err.message),
+  );
+});
+
+test('Build label index lists every missing label once', () => {
+  assert.throws(
+    () => runNode('Build label index', {
+      json: { labels: [] },
+      nodes: { Constants: [{ json: { validLabels: ['Receipts', 'Receipts', 'Taxes'] } }] },
+    }),
+    (err) => /missing 3 label\(s\)/.test(err.message),
+  );
 });
 
 // ─── Parse metadata ──────────────────────────────────────────────────────────

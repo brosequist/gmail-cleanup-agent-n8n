@@ -85,7 +85,7 @@
     },
     {
       "parameters": {
-        "jsCode": "\nconst labels = $json.labels || [];\nconst labelNameToId = {};\nfor (const l of labels) labelNameToId[l.name] = l.id;\nconst reviewedLabelId = labelNameToId['LLM Reviewed'] || null;\nreturn [{ json: { labelNameToId, reviewedLabelId, total: labels.length } }];\n",
+        "jsCode": "\nconst labels = $json.labels || [];\nconst labelNameToId = {};\nfor (const l of labels) labelNameToId[l.name] = l.id;\nconst c = $('Constants').first().json;\nconst REVIEWED = 'LLM Reviewed';\n\n// Fail loudly, before any message is fetched, if Gmail lacks a label this\n// workflow applies. The workflow never creates labels. Gmail silently accepts\n// addLabelIds:[null] with a 200, so a missing label would no-op every stamp:\n// nothing gets marked LLM Reviewed, the -label:llm-reviewed query never\n// shrinks, and the self-rechaining loop re-processes the same newest mail\n// forever while every run reports success. A missing category label would\n// likewise leave every email in that category unlabelled.\nconst needed = [REVIEWED, ...(c.validLabels || [])];\nconst missing = needed.filter((n, i) => needed.indexOf(n) === i && !labelNameToId[n]);\nif (missing.length) {\n  throw new Error(\n    `Gmail is missing ${missing.length} label(s) this workflow applies: ` +\n    missing.map(n => `\"${n}\"`).join(', ') + '. ' +\n    'Create them in Gmail (Settings > Labels > Create new label, names exactly as ' +\n    'written; see the README) and run again. Nothing was classified.');\n}\n\nconst reviewedLabelId = labelNameToId[REVIEWED];\nreturn [{ json: { labelNameToId, reviewedLabelId, total: labels.length } }];\n",
         "mode": "runOnceForAllItems"
       },
       "id": "n-label-idx",
