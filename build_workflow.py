@@ -120,9 +120,14 @@ The \`decisions\` array must have exactly the same number of entries as input em
 
 ${emailsBlock.join('\n')}`;
 
+// Lone UTF-16 surrogates (an emoji cut in half by the .slice() above, or a
+// malformed one straight from Gmail) make llama-server reject the whole
+// request: "invalid string: surrogate U+D800..U+DBFF". The email stays in the
+// batch, so every run would fail at the same place. toWellFormed() swaps any
+// lone half for U+FFFD and leaves intact emoji alone.
 return [{
   json: {
-    prompt,
+    prompt: prompt.toWellFormed(),
     ids: batch.map(e => e.id),
     batchEmails: batch,
   }
