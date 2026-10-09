@@ -24,6 +24,13 @@ N8N_BASE_URL = "http://localhost:5678"
 LLM_API_URL = "http://localhost:11434/v1/chat/completions"
 LLM_MODEL   = "qwen3"
 
+# Send chat_template_kwargs {enable_thinking: false} with every request. Reasoning
+# models (qwen3 and similar) otherwise spend the whole token budget "thinking" and
+# return EMPTY content with finish_reason "length". Ollama, llama.cpp and vLLM
+# accept the field; set False for endpoints that reject unknown request fields,
+# such as the OpenAI API.
+LLM_DISABLE_THINKING = True
+
 # ntfy push notification for the per-run summary. ntfy.sh is the free public
 # server — pick a long, hard-to-guess topic. Set NTFY_TOPIC = "" to disable.
 NTFY_SERVER = "https://ntfy.sh"
@@ -99,7 +106,11 @@ const prompt = `${rules.trim()}
 
 # Available labels
 
-When \`action\` is \`keep\`, choose the single best-matching label from this list. If \`action\` is \`trash\`, set \`label\` to \`null\`. Pick exactly one label per kept email — no nesting, no comma-separated values.
+When \`action\` is \`keep\`, give the email its best-matching label from this list in a \`labels\` array. Use label names exactly as written: no nesting, no comma-separated values, no invented names. If \`action\` is \`trash\`, set \`labels\` to an empty array \`[]\`.
+
+**One label is the default.** Add a SECOND label only when two categories are independently true of the same email: a hotel booking receipt really is both a travel record and a receipt; a vet bill really is both a pet matter and a statement. Never a third.
+
+**Do not use a second label to avoid choosing.** Where the rules already settle a pairing (a bill goes in one category, a one-off purchase in another), that decision is made: apply the one the rules name. A second label is for genuine overlap, not for hedging.
 
 ${labelLines.join('\n')}
 
@@ -109,12 +120,13 @@ Return ONLY a JSON object with this exact structure (no prose, no markdown):
 
 \`\`\`json
 {"decisions": [
-  {"id": "...", "action": "keep", "label": "Receipts"},
-  {"id": "...", "action": "trash", "label": null}
+  {"id": "...", "action": "keep", "labels": ["Receipts"]},
+  {"id": "...", "action": "keep", "labels": ["Travel", "Receipts"]},
+  {"id": "...", "action": "trash", "labels": []}
 ]}
 \`\`\`
 
-The \`decisions\` array must have exactly the same number of entries as input emails, in the same order. Each \`id\` must match an input id. Each \`action\` is either \`"keep"\` or \`"trash"\`. Each \`label\` is either one of the labels above (when keeping) or \`null\` (when trashing).
+The \`decisions\` array must have exactly the same number of entries as input emails, in the same order. Each \`id\` must match an input id. Each \`action\` is either \`"keep"\` or \`"trash"\`. Each \`labels\` is an array of one or two of the labels above when keeping, and \`[]\` when trashing.
 
 # Emails to classify
 
@@ -180,12 +192,26 @@ try {
   const parsed = JSON.parse(raw);
   if (Array.isArray(parsed.decisions)) decisions = parsed.decisions;
 } catch (e) {
-  // Regex fallback
-  const re = /\{\s*"id"\s*:\s*"([^"]+)"\s*,\s*"action"\s*:\s*"(keep|trash)"\s*,\s*"label"\s*:\s*(?:"([^"]*)"|null)\s*\}/g;
+  // Regex fallback: the `labels` array, or a legacy scalar `label`.
+  const re = /\{\s*"id"\s*:\s*"([^"]+)"\s*,\s*"action"\s*:\s*"(keep|trash)"\s*,\s*(?:"labels"\s*:\s*\[([^\]]*)\]|"label"\s*:\s*(?:"([^"]*)"|null))\s*\}/g;
   let m;
   while ((m = re.exec(raw)) !== null) {
-    decisions.push({ id: m[1], action: m[2], label: m[3] ?? null });
+    const labels = m[3] != null ? [...m[3].matchAll(/"([^"]*)"/g)].map(x => x[1])
+                                : (m[4] ? [m[4]] : []);
+    decisions.push({ id: m[1], action: m[2], labels });
   }
+}
+
+// One category label by default, a second only for genuine overlap, never a
+// third (same contract as the private engine and the Python CLI v1.4).
+const MAX_LABELS = 2;
+// Labels on a decision: the `labels` array, or the scalar `label` an older
+// prompt or model may still return. Blank and duplicate names dropped.
+function decisionLabels(d) {
+  const raw = Array.isArray(d.labels) ? d.labels : (d.label ? [d.label] : []);
+  const out = [];
+  for (const n of raw) if (typeof n === 'string' && n && !out.includes(n)) out.push(n);
+  return out;
 }
 
 // Validate + plan
@@ -203,20 +229,31 @@ for (const d of decisions) {
     errors.push(`bad action for ${d.id}: ${action}`);
     continue;
   }
-  let label = d.label;
-  if (action === 'keep' && !validLabels.includes(label)) {
-    errors.push(`unknown label for ${d.id}: ${label}`);
-    continue;
+  // Trash takes no category (it is gone at once); anything sent is ignored.
+  let labels = action === 'trash' ? [] : decisionLabels(d);
+  if (action === 'keep') {
+    if (labels.length > MAX_LABELS) {
+      errors.push(`${labels.length} labels for ${d.id}, kept first ${MAX_LABELS}: ${labels.join('/')}`);
+      labels = labels.slice(0, MAX_LABELS);
+    }
+    const unknown = labels.filter(l => !validLabels.includes(l));
+    labels = labels.filter(l => validLabels.includes(l));
+    if (!labels.length) {
+      errors.push(`unknown label for ${d.id}: ${unknown.join('/') || null}`);
+      continue;
+    }
+    if (unknown.length) errors.push(`dropped unknown label(s) for ${d.id}: ${unknown.join('/')}`);
   }
-  if (action === 'trash') label = null;
   seen.add(d.id);
-  const labelId = label ? labelIndex[label] : null;
+  const labelIds = labels.map(l => labelIndex[l]).filter(Boolean);
   const em = inputById.get(d.id) || {};
   plan.push({
     id: d.id,
     action,
-    label,
-    labelId,
+    labels,
+    labelIds,
+    label: labels[0] ?? null,        // first label; Route action keys on labelId
+    labelId: labelIds[0] ?? null,
     reviewedLabelId,
     sender: em.sender || '',
     subject: em.subject || '',
@@ -228,7 +265,7 @@ for (const id of inputIds) {
   if (!seen.has(id)) {
     const em = inputById.get(id) || {};
     plan.push({
-      id, action: 'keep', label: null, labelId: null, reviewedLabelId,
+      id, action: 'keep', labels: [], labelIds: [], label: null, labelId: null, reviewedLabelId,
       sender: em.sender || '',
       subject: em.subject || '',
     });
@@ -278,11 +315,13 @@ const items = sd.runResults || [];
 const perRunLimit = $('Constants').first().json.perRunLimit;
 const kept = items.filter(x => x.action === 'keep');
 const trashed = items.filter(x => x.action === 'trash');
+// An email with two labels counts under both.
 const byLabel = {};
 for (const k of kept) {
-  const l = k.label || '(no label)';
-  byLabel[l] = (byLabel[l] || 0) + 1;
+  const ls = (k.labels && k.labels.length) ? k.labels : [k.label || '(no label)'];
+  for (const l of ls) byLabel[l] = (byLabel[l] || 0) + 1;
 }
+const multiLabelled = kept.filter(k => k.labels && k.labels.length > 1).length;
 const labelLines = Object.entries(byLabel)
   .sort((a, b) => b[1] - a[1])
   .map(([l, n]) => `  ${l}: ${n}`)
@@ -298,10 +337,12 @@ const statusLine = moreRemain
   ? `Backlog not cleared — re-triggering for the next ${perRunLimit}.`
   : `Backlog cleared — nothing left matching the filter.`;
 const title = `Gmail cleanup: ${kept.length} kept, ${trashed.length} trashed of ${total}`;
-const body = `Run finished.\nProcessed: ${total}\nKept (labeled): ${kept.length}\nTrashed: ${trashed.length}\n\nKept by label:\n${labelLines || '  (none)'}\n\n${statusLine}`;
+const body = `Run finished.\nProcessed: ${total}\nKept (labeled): ${kept.length}` +
+  (multiLabelled ? ` (${multiLabelled} with 2 labels)` : '') +
+  `\nTrashed: ${trashed.length}\n\nKept by label:\n${labelLines || '  (none)'}\n\n${statusLine}`;
 // Clear for next run
 sd.runResults = [];
-return [{ json: { title, body, total, kept: kept.length, trashed: trashed.length, moreRemain } }];
+return [{ json: { title, body, total, kept: kept.length, trashed: trashed.length, multiLabelled, moreRemain } }];
 """
 
 # --- Re-chain gate: emit one item to fire the re-trigger, or nothing to stop ---
@@ -425,6 +466,7 @@ constants_js = (
         "gmailQuery": GMAIL_QUERY,
         "model": LLM_MODEL,
         "llmApiUrl": LLM_API_URL,
+        "disableThinking": LLM_DISABLE_THINKING,
         "ntfyTopic": NTFY_TOPIC,
         "rulesMd": rules_md,
         "existingLabels": existing,
@@ -522,7 +564,7 @@ nodes.append({
         "sendBody": True,
         "contentType": "json",
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({\n  model: $('Constants').first().json.model,\n  messages: [{ role: 'user', content: $json.prompt }],\n  response_format: { type: 'json_object' },\n  temperature: 0.2,\n}) }}",
+        "jsonBody": "={{ JSON.stringify({\n  model: $('Constants').first().json.model,\n  messages: [{ role: 'user', content: $json.prompt }],\n  response_format: { type: 'json_object' },\n  temperature: 0.2,\n  ...($('Constants').first().json.disableThinking ? { chat_template_kwargs: { enable_thinking: false } } : {}),\n}) }}",
         "options": {"timeout": 180000, "response": {"response": {"responseFormat": "json"}}},
     },
     "id": "n-ask-llm",
@@ -611,7 +653,8 @@ nodes.append({
     "onError": "continueRegularOutput",
 })
 
-# 14b. Label branch — POST /messages/{id}/modify with addLabelIds (category + Reviewed)
+# 14b. Label branch — POST /messages/{id}/modify with addLabelIds (the one or two
+# category labels + Reviewed). `labelId` (the first) only drives Route action.
 nodes.append({
     "parameters": {
         "method": "POST",
@@ -621,7 +664,7 @@ nodes.append({
         "sendBody": True,
         "contentType": "json",
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ addLabelIds: [$json.labelId, $json.reviewedLabelId] }) }}",
+        "jsonBody": "={{ JSON.stringify({ addLabelIds: [...($json.labelIds || [$json.labelId]), $json.reviewedLabelId] }) }}",
         "options": {"timeout": 30000, "response": {"response": {"responseFormat": "json"}}},
     },
     "id": "n-modify",

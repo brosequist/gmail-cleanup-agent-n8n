@@ -17,8 +17,10 @@ to keep doing a small weekly pass afterwards.
 
 ## Features
 
-- **LLM-powered triage** — every old email is classified *keep* (with a single
-  best-fit category label) or *trash*, using rules you control.
+- **LLM-powered triage** — every old email is classified *keep* or *trash*,
+  using rules you control. A kept email gets one category label, or two when
+  two categories are genuinely true of it (a hotel booking receipt is both
+  travel and a receipt). Never a third, and never a second to avoid choosing.
 - **Self-rechaining loop** — one trigger drains an arbitrarily large backlog
   over many short, crash-safe executions instead of one fragile mega-run.
 - **Idempotent** — every processed message is stamped with an `LLM Reviewed`
@@ -69,16 +71,21 @@ Messages are split into batches of 20 and looped:
   the available label catalog, and the 20 emails' metadata. Emails whose
   metadata fetch failed (no ID) are dropped here so they cannot corrupt a batch.
 - **Ask LLM** — POSTs the prompt to an OpenAI-compatible chat-completions
-  endpoint, requesting a strict JSON response.
+  endpoint, requesting a strict JSON response. By default it also sends
+  `chat_template_kwargs: {enable_thinking: false}`, so reasoning models answer
+  instead of spending the token budget thinking (see `LLM_DISABLE_THINKING`).
 - **Parse decisions** — parses the response (with a regex fallback if the JSON
   is malformed) and *validates* every decision: unknown IDs, duplicates, bad
   actions, and invalid labels are rejected; any message the model omitted is
-  defaulted to a safe *keep*.
+  defaulted to a safe *keep*. Each decision carries a `labels` array (a legacy
+  scalar `label` is still accepted); a third label is cut, and an unknown second
+  label is dropped with a parse error.
 - **Route action** — a Switch sends each message down one of three branches:
   - **Trash message → Mark reviewed (post-trash)** — trashes the message, then
     stamps it `LLM Reviewed`.
-  - **Add label** — applies the chosen category label *and* `LLM Reviewed` in a
-    single Gmail call.
+  - **Add label** — applies the chosen category label(s) *and* `LLM Reviewed`
+    in a single Gmail call. The run summary counts an email under each of its
+    labels and reports how many kept emails got two.
   - **Mark reviewed (skip)** — for a kept message whose label could not be
     resolved; stamps `LLM Reviewed` only, so it is not re-evaluated forever.
 
@@ -173,6 +180,7 @@ Edit the configuration block at the top of `build_workflow.py`:
 | Setting | Purpose |
 |---|---|
 | `LLM_API_URL`, `LLM_MODEL` | Your chat-completions endpoint and model. |
+| `LLM_DISABLE_THINKING` | Default `True`: sends `chat_template_kwargs: {enable_thinking: false}` so reasoning models (e.g. qwen3) return an answer instead of empty content with `finish_reason: length`. Set `False` for endpoints that reject unknown request fields, such as the OpenAI API. |
 | `N8N_BASE_URL` | URL n8n can reach itself on (for the re-chain webhook). |
 | `NTFY_SERVER`, `NTFY_TOPIC` | Push notifications. Set `NTFY_TOPIC = ""` to disable. |
 | `PER_RUN_LIMIT` | Emails per execution before re-chaining. |

@@ -317,3 +317,83 @@ test('Re-chain gate: fires once — only when total > 0 AND more remain', () => 
   assert.equal(runNode('Re-chain gate', { input: [{ json: { total: 0, moreRemain: true } }] }).length, 0);
   assert.equal(runNode('Re-chain gate', { input: [{ json: { total: 2000, moreRemain: false } }] }).length, 0);
 });
+
+// ─── One-or-two-label contract (GCA-6) ──────────────────────────────────────
+
+function pd2({ content, ids }) {
+  const ctx = pdContext({ content, ids, batchEmails: ids.map((id) => ({ id, sender: 's', subject: 't' })) });
+  ctx.nodes['Build label index'] = [{ json: {
+    labelNameToId: { Receipts: 'Label_5', Travel: 'Label_6', Taxes: 'Label_7' }, reviewedLabelId: 'Label_19',
+  } }];
+  ctx.nodes.Constants = [{ json: { validLabels: ['Receipts', 'Travel', 'Taxes'] } }];
+  return ctx;
+}
+const byId = (out) => Object.fromEntries(out.map((o) => [o.json.id, o.json]));
+
+test('Build prompt states the one-or-two-label contract with the do-not-hedge rule', () => {
+  const p = runNode('Build prompt', {
+    input: [{ json: { id: 'a', sender: 's', subject: 't', snippet: 'x' } }],
+    nodes: { Constants: CONSTANTS },
+  })[0].json.prompt;
+  assert.ok(p.includes('One label is the default.'));
+  assert.ok(p.includes('Never a third.'));
+  assert.ok(p.includes('Do not use a second label to avoid choosing.'));
+  assert.ok(p.includes('"labels": ["Travel", "Receipts"]'));
+  assert.ok(!/single best-matching label/.test(p), 'old one-label wording is gone');
+});
+
+test('Parse decisions: a two-label keep resolves both label ids (first one drives routing)', () => {
+  const out = byId(runNode('Parse decisions', pd2({
+    ids: ['a'], content: JSON.stringify({ decisions: [
+      { id: 'a', action: 'keep', labels: ['Travel', 'Receipts'] }] }),
+  })));
+  assert.deepEqual(out.a.labels, ['Travel', 'Receipts']);
+  assert.deepEqual(out.a.labelIds, ['Label_6', 'Label_5']);
+  assert.equal(out.a.label, 'Travel');
+  assert.equal(out.a.labelId, 'Label_6');
+});
+
+test('Parse decisions: a legacy scalar label is still accepted', () => {
+  const out = byId(runNode('Parse decisions', pd2({
+    ids: ['a'], content: JSON.stringify({ decisions: [{ id: 'a', action: 'keep', label: 'Taxes' }] }),
+  })));
+  assert.deepEqual(out.a.labels, ['Taxes']);
+  assert.deepEqual(out.a.labelIds, ['Label_7']);
+});
+
+test('Parse decisions: a third label is trimmed and an unknown one dropped, with errors', () => {
+  const out = byId(runNode('Parse decisions', pd2({
+    ids: ['a', 'b'], content: JSON.stringify({ decisions: [
+      { id: 'a', action: 'keep', labels: ['Travel', 'Receipts', 'Taxes'] },
+      { id: 'b', action: 'keep', labels: ['Receipts', 'Nope'] }] }),
+  })));
+  assert.deepEqual(out.a.labels, ['Travel', 'Receipts']);
+  assert.deepEqual(out.b.labels, ['Receipts']);
+  const errs = out.a.parseErrors.join('\n');
+  assert.match(errs, /3 labels for a, kept first 2/);
+  assert.match(errs, /dropped unknown label\(s\) for b: Nope/);
+});
+
+test('Parse decisions: trash ignores any labels; regex fallback reads a labels array', () => {
+  const content = 'oops {"id": "a", "action": "keep", "labels": ["Travel", "Receipts"]} '
+    + '{"id": "b", "action": "trash", "labels": ["Taxes"]} not json';
+  const out = byId(runNode('Parse decisions', pd2({ ids: ['a', 'b'], content })));
+  assert.deepEqual(out.a.labels, ['Travel', 'Receipts']);
+  assert.deepEqual(out.b.labels, []);
+  assert.equal(out.b.labelId, null);
+});
+
+test('Tally counts each label of a two-label keep and reports multi-labelled keeps', () => {
+  const out = runNode('Tally', tallyCtx([
+    { action: 'keep', labels: ['Travel', 'Receipts'], label: 'Travel' },
+    { action: 'keep', labels: ['Receipts'], label: 'Receipts' },
+    { action: 'keep', label: 'Receipts' },              // pre-GCA-6 shape
+    { action: 'trash' },
+  ], 4));
+  const j = out[0].json;
+  assert.equal(j.kept, 3);
+  assert.equal(j.multiLabelled, 1);
+  assert.match(j.body, /Kept \(labeled\): 3 \(1 with 2 labels\)/);
+  assert.match(j.body, /Receipts: 3/);
+  assert.match(j.body, /Travel: 1/);
+});
