@@ -5,6 +5,8 @@
 //   1. id-less emails desyncing Parse decisions
 //   2. ntfy notification firing many times per run
 //   3. the re-chain stopping early on a partial-but-full batch
+// and for the ones found since (lone surrogates, missing labels, the age gate,
+// the 2,000-per-run cap, overlapping drains).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runNode } from './harness.mjs';
@@ -258,14 +260,14 @@ test('Parse decisions: results accumulate into workflow static data', () => {
     content: JSON.stringify({ decisions: [{ id: 'a', action: 'trash', label: null }] }),
     ids: ['a'], batchEmails: emails, staticData,
   }));
-  assert.equal(staticData.runResults.length, 1);
+  assert.equal(staticData.runs['exec-1'].items.length, 1);
 });
 
 // ─── Tally ───────────────────────────────────────────────────────────────────
 
 function tallyCtx(runResults, idCount, perRunLimit = 2000) {
   return {
-    staticData: { runResults },
+    staticData: { runs: { 'exec-1': { startedAt: Date.now(), items: runResults } } },
     nodes: {
       Constants: [{ json: { perRunLimit } }],
       'Extract IDs': Array.from({ length: idCount }, () => ({ json: { id: 'x' } })),
@@ -311,10 +313,71 @@ test('Tally: moreRemain false when the query returned a partial batch', () => {
   assert.equal(out[0].json.moreRemain, false);
 });
 
-test('Tally clears the accumulator for the next run', () => {
+test('Tally drops its own accumulator for the next run', () => {
   const ctx = tallyCtx([{ action: 'trash' }], 1);
   runNode('Tally', ctx);
-  assert.deepEqual(ctx.staticData.runResults, []);
+  assert.deepEqual(ctx.staticData.runs, {});
+});
+
+// ─── Overlapping runs (GCA-12) ───────────────────────────────────────────────
+
+const HOUR = 3600000;
+const guard = (staticData) => runNode('Skip if draining', { input: [{ json: {} }], staticData });
+
+test('Skip if draining: a scheduled run is held back while a drain is active', () => {
+  assert.equal(guard({ drainActiveAt: Date.now() - 2 * HOUR }).length, 0);
+});
+
+test('Skip if draining: proceeds with no drain, a finished drain, or a stale marker', () => {
+  assert.equal(guard({}).length, 1);
+  assert.equal(guard({ drainActiveAt: null }).length, 1);
+  assert.equal(guard({ drainActiveAt: Date.now() - 25 * HOUR }).length, 1);   // DRAIN_STALE_HOURS = 24
+});
+
+test('Tally sets the drain marker when it re-chains and clears it on the final run', () => {
+  const mid = tallyCtx([{ action: 'trash' }], 2000);
+  runNode('Tally', mid);
+  assert.ok(Date.now() - mid.staticData.drainActiveAt < 5000);
+  const last = tallyCtx([{ action: 'trash' }], 10);
+  last.staticData.drainActiveAt = Date.now() - HOUR;
+  runNode('Tally', last);
+  assert.equal(last.staticData.drainActiveAt, null);
+});
+
+test('Overlapping executions keep separate tallies (regression: shared runResults)', () => {
+  const staticData = {};
+  const constants = (executionId) => runNode('Constants', { staticData, executionId });
+  const decide = (executionId, id, action) => runNode('Parse decisions', {
+    ...pdContext({
+      content: JSON.stringify({ decisions: [{ id, action, labels: ['Receipts'] }] }),
+      ids: [id], batchEmails: [{ id, sender: 's', subject: 't', age_days: 40 }], staticData,
+    }),
+    executionId,
+  });
+  constants('A');
+  decide('A', 'a1', 'keep');
+  constants('B');                 // B starts mid-way through A: must not clear A
+  decide('B', 'b1', 'trash');
+  decide('A', 'a2', 'keep');
+  const tally = (executionId) => runNode('Tally', {
+    staticData, executionId,
+    nodes: { Constants: [{ json: { perRunLimit: 2000, trashAgeDays: 30 } }], 'Extract IDs': [{ json: { id: 'x' } }] },
+  })[0].json;
+  const a = tally('A');
+  assert.deepEqual([a.total, a.kept, a.trashed], [2, 2, 0]);
+  const b = tally('B');
+  assert.deepEqual([b.total, b.kept, b.trashed], [1, 0, 1]);
+  assert.deepEqual(staticData.runs, {});
+});
+
+test('Constants prunes accumulators a crashed run left behind, but not a live one', () => {
+  const staticData = { runResults: [{ action: 'trash' }], runs: {
+    old: { startedAt: Date.now() - 3 * 86400000, items: [] },
+    live: { startedAt: Date.now() - HOUR, items: [{ action: 'keep' }] },
+  } };
+  runNode('Constants', { staticData, executionId: 'new' });
+  assert.deepEqual(Object.keys(staticData.runs).sort(), ['live', 'new']);
+  assert.equal(staticData.runResults, undefined);
 });
 
 // ─── Gates (the spurious-refire guards) ──────────────────────────────────────

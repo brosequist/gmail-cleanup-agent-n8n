@@ -1,7 +1,8 @@
 // Minimal n8n Code-node test harness.
 //
 // It loads gmail-cleanup.json, pulls the `jsCode` of a node by name, and runs
-// it with mocked n8n globals ($input, $json, $(), $getWorkflowStaticData).
+// it with mocked n8n globals ($input, $json, $(), $getWorkflowStaticData,
+// $execution).
 // This tests the EXACT code that gets imported into n8n, not a copy.
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -33,9 +34,10 @@ function wrap(items) {
  * @param {object} ctx.json               value for $json (runOnceForEachItem)
  * @param {object} ctx.nodes              map of nodeName -> items array, for $('...')
  * @param {object} ctx.staticData         object returned by $getWorkflowStaticData
+ * @param {string} ctx.executionId        value of $execution.id
  * @returns whatever the node code returns (array or single item)
  */
-export function runNode(nodeName, { input = [], json, nodes = {}, staticData = {} } = {}) {
+export function runNode(nodeName, { input = [], json, nodes = {}, staticData = {}, executionId = 'exec-1' } = {}) {
   const $input = wrap(input);
   const $ = (name) => {
     if (!(name in nodes)) {
@@ -45,8 +47,9 @@ export function runNode(nodeName, { input = [], json, nodes = {}, staticData = {
   };
   const $getWorkflowStaticData = () => staticData;
   // n8n Code nodes use a top-level `return`, which is legal in a Function body.
-  const fn = new Function('$input', '$json', '$', '$getWorkflowStaticData', jsCodeOf(nodeName));
-  return fn($input, json, $, $getWorkflowStaticData);
+  const $execution = { id: executionId };
+  const fn = new Function('$input', '$json', '$', '$getWorkflowStaticData', '$execution', jsCodeOf(nodeName));
+  return fn($input, json, $, $getWorkflowStaticData, $execution);
 }
 
 export { WORKFLOW };

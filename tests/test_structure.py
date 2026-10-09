@@ -22,7 +22,7 @@ NODES = {n["name"]: n for n in WORKFLOW["nodes"]}
 CONNECTIONS = WORKFLOW["connections"]
 
 EXPECTED_NODES = {
-    "Weekly schedule", "Re-chain webhook", "Constants", "List labels",
+    "Weekly schedule", "Skip if draining", "Re-chain webhook", "Constants", "List labels",
     "Build label index", "List messages", "Extract IDs", "Get metadata",
     "Parse metadata", "Batch (20)", "Build prompt", "Ask LLM", "Parse decisions",
     "Route action", "Trash message", "Mark reviewed (post-trash)", "Add label",
@@ -108,10 +108,19 @@ def test_all_connections_reference_existing_nodes():
 
 
 def test_both_triggers_enter_the_pipeline_at_constants():
-    for trigger in ("Weekly schedule", "Re-chain webhook"):
-        assert "Constants" in _targets(trigger), (
-            f"{trigger!r} must feed Constants"
-        )
+    # The schedule goes through the drain guard first; the re-chain never does,
+    # or a drain would block its own next run.
+    assert _targets("Weekly schedule") == ["Skip if draining"]
+    assert _targets("Skip if draining") == ["Constants"]
+    assert _targets("Re-chain webhook") == ["Constants"]
+
+
+def test_drain_guard_uses_the_configured_staleness(tmp_path):
+    js = NODES["Skip if draining"]["parameters"]["jsCode"]
+    assert "const staleMs = 24 * 3600000;" in js
+    wf = _build_variant(tmp_path, DRAIN_STALE_HOURS=6)
+    node = next(n for n in wf["nodes"] if n["name"] == "Skip if draining")
+    assert "const staleMs = 6 * 3600000;" in node["parameters"]["jsCode"]
 
 
 def test_missing_label_check_runs_before_any_mail_is_fetched():
