@@ -295,6 +295,14 @@ test('Tally: moreRemain true on a full query batch even if total < perRunLimit (
   assert.equal(out[0].json.moreRemain, true);
 });
 
+test('Tally: moreRemain true on a full batch above 2,000 per run (regression: chain stopped after one run)', () => {
+  const out = runNode('Tally', tallyCtx(
+    Array.from({ length: 5000 }, () => ({ action: 'keep', label: 'Receipts' })),
+    5000, 5000,
+  ));
+  assert.equal(out[0].json.moreRemain, true);
+});
+
 test('Tally: moreRemain false when the query returned a partial batch', () => {
   const out = runNode('Tally', tallyCtx(
     Array.from({ length: 500 }, () => ({ action: 'trash' })),

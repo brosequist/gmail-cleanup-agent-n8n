@@ -5,6 +5,7 @@ Run `python build_workflow.py` after editing the configuration below or the
 files in config/. It writes gmail-cleanup.json, which you import into n8n.
 """
 import json
+import math
 from pathlib import Path
 
 # ─── Configuration ──────────────────────────────────────────────────────────
@@ -40,7 +41,8 @@ NTFY_TOPIC  = "change-me-to-a-private-topic"
 # Optional n8n workflow ID to invoke on failure (n8n "Error Workflow"). "" = none.
 ERROR_WORKFLOW_ID = ""
 
-# Emails processed per execution before the workflow re-chains itself.
+# Emails processed per execution before the workflow re-chains itself. Any value
+# works: List messages fetches as many 500-ID pages as this needs.
 PER_RUN_LIMIT = 2000
 
 # Age gate. Every email is CATEGORISED at any age, but only an email at least
@@ -558,7 +560,7 @@ nodes.append(code_node("Constants", "n-constants", constants_js, [460, 300], run
 # 3. List labels
 nodes.append(http_node("List labels", "n-list-labels", "GET",
     "https://gmail.googleapis.com/gmail/v1/users/me/labels",
-    [680, 200], response_format="json"))
+    [680, 200], response_format="json", retry=True))
 
 # 4. Build label index
 nodes.append(code_node("Build label index", "n-label-idx", LABEL_INDEX_JS, [900, 200], runOnce=True))
@@ -590,10 +592,14 @@ nodes.append(http_node("List messages", "n-list-msgs", "GET",
             "paginationCompleteWhen": "other",
             "completeExpression": "={{ !$response.body.nextPageToken || ($pageCount * 500) >= $('Constants').first().json.perRunLimit }}",
             "limitPagesFetched": True,
-            "maxRequests": 4,
+            # Enough pages for PER_RUN_LIMIT. A fixed 4 capped every run at
+            # 2,000 IDs, so with a higher limit Tally's moreRemain
+            # (ids >= limit) could never be true and the chain stopped after
+            # one run.
+            "maxRequests": math.ceil(PER_RUN_LIMIT / 500),
         }
     },
-    response_format="json"))
+    response_format="json", retry=True))
 
 # 6. Extract message IDs
 nodes.append(code_node("Extract IDs", "n-extract-ids",

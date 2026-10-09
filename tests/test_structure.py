@@ -185,6 +185,28 @@ def test_a_set_ntfy_topic_posts_to_that_topic():
     assert _targets("Tally") == ["ntfy gate", "Re-chain gate"]
 
 
+def test_list_messages_fetches_enough_pages_for_any_per_run_limit(tmp_path):
+    """maxRequests was fixed at 4 (2,000 IDs), so a PER_RUN_LIMIT above 2,000
+    could never see a full batch and the re-chain stopped after one run."""
+    pages = NODES["List messages"]["parameters"]["options"]["pagination"]["pagination"]
+    assert pages["maxRequests"] * 500 >= _constants_payload()["perRunLimit"]
+    for limit, expected in ((5000, 10), (1200, 3)):
+        sub = tmp_path / str(limit)
+        sub.mkdir()
+        wf = _build_variant(sub, PER_RUN_LIMIT=limit)
+        node = next(n for n in wf["nodes"] if n["name"] == "List messages")
+        assert node["parameters"]["options"]["pagination"]["pagination"]["maxRequests"] == expected
+
+
+def test_every_gmail_call_retries():
+    """Including the two list calls: one transient 5xx/429 there used to fail
+    the whole run."""
+    for node in WORKFLOW["nodes"]:
+        if "oAuth2Api" in node.get("credentials", {}):
+            assert node.get("retryOnFail") is True, node["name"]
+            assert node.get("maxTries", 0) >= 3, node["name"]
+
+
 # ─── Config embedding ────────────────────────────────────────────────────────
 
 def _constants_payload():
