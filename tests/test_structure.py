@@ -24,7 +24,7 @@ EXPECTED_NODES = {
     "Build label index", "List messages", "Extract IDs", "Get metadata",
     "Parse metadata", "Batch (20)", "Build prompt", "Ask LLM", "Parse decisions",
     "Route action", "Trash message", "Mark reviewed (post-trash)", "Add label",
-    "Mark reviewed (skip)", "Merge actions", "Tally", "ntfy gate",
+    "Mark needs-review", "Merge actions", "Tally", "ntfy gate",
     "ntfy: summary", "Re-chain gate", "Re-trigger next batch",
 }
 
@@ -128,15 +128,15 @@ def test_classify_chain_is_in_order():
 
 
 def test_route_action_has_three_branches_in_order():
-    # Switch outputs: 0 = trash, 1 = keep+label, 2 = skip.
+    # Switch outputs: 0 = trash, 1 = keep+label, 2 = no category (deferred / needs review).
     outputs = CONNECTIONS["Route action"]["main"]
     assert [o[0]["node"] for o in outputs] == [
-        "Trash message", "Add label", "Mark reviewed (skip)",
+        "Trash message", "Add label", "Mark needs-review",
     ]
 
 
 def test_every_apply_branch_returns_to_the_merge():
-    for branch_end in ("Mark reviewed (post-trash)", "Add label", "Mark reviewed (skip)"):
+    for branch_end in ("Mark reviewed (post-trash)", "Add label", "Mark needs-review"):
         assert "Merge actions" in _targets(branch_end)
     # Trash is always followed by its reviewed-stamp before merging.
     assert _targets("Trash message") == ["Mark reviewed (post-trash)"]
@@ -172,9 +172,16 @@ def test_constants_embeds_rules_and_label_catalog():
     assert payload["validLabels"] == existing + list(auto_create)
 
 
-def test_gmail_query_excludes_the_reviewed_label():
-    # The idempotency contract: processed mail must drop out of the candidate set.
-    assert "-label:llm-reviewed" in _constants_payload()["gmailQuery"]
+def test_gmail_query_has_both_parenthesised_arms():
+    """The idempotency contract, for the two-pass design: arm 1 drops categorised
+    mail, arm 2 drops mail with a verdict. Both arms MUST be parenthesised: the
+    unparenthesised `-label:"A" OR (...)` parses but returns the first arm alone,
+    which would silently disable trashing."""
+    p = _constants_payload()
+    q = p["gmailQuery"]
+    assert q == (f'(-label:"{p["categorizedLabelName"]}") OR '
+                 f'(older_than:{p["trashAgeDays"]}d -label:"{p["reviewedLabelName"]}")')
+    assert p["trashAgeDays"] > 0 and isinstance(p["labelOnDeferred"], list)
 
 
 # ─── Sanitization (open-source repo must stay clean) ─────────────────────────
@@ -219,3 +226,24 @@ def test_llm_request_disables_thinking_by_default():
 def test_add_label_applies_every_category_label_plus_reviewed():
     body = NODES["Add label"]["parameters"]["jsonBody"]
     assert "...($json.labelIds" in body and "$json.reviewedLabelId" in body
+
+
+def test_apply_branches_stamp_the_age_gate_labels():
+    """Reviewed only when a verdict was acted on; Categorized always; Needs Review
+    only for genuine failures, never for deferred trash."""
+    add = NODES["Add label"]["parameters"]["jsonBody"]
+    assert "$json.categorizedLabelId" in add and "$json.stampReviewed ? [$json.reviewedLabelId]" in add
+    nr = NODES["Mark needs-review"]["parameters"]["jsonBody"]
+    assert "[$json.categorizedLabelId]" in nr
+    assert "$json.deferred ? [] : [$json.needsReviewLabelId]" in nr
+    assert "$json.stampReviewed ? [$json.reviewedLabelId]" in nr
+    post = NODES["Mark reviewed (post-trash)"]["parameters"]["jsonBody"]
+    assert "reviewedLabelId" in post and "categorizedLabelId" in post
+
+
+def test_label_index_requires_all_three_control_labels():
+    p = _constants_payload()
+    assert (p["reviewedLabelName"], p["categorizedLabelName"], p["needsReviewLabelName"]) == (
+        "LLM Reviewed", "LLM Categorized", "Needs Review")
+    js = NODES["Build label index"]["parameters"]["jsCode"]
+    assert "c.reviewedLabelName, c.categorizedLabelName, c.needsReviewLabelName" in js

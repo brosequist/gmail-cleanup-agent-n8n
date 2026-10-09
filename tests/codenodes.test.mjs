@@ -11,18 +11,25 @@ import { runNode } from './harness.mjs';
 
 // ─── Build label index ───────────────────────────────────────────────────────
 
-const LI_CONSTANTS = { Constants: [{ json: { validLabels: ['Taxes', 'Receipts'] } }] };
+const CONTROL = { reviewedLabelName: 'LLM Reviewed', categorizedLabelName: 'LLM Categorized', needsReviewLabelName: 'Needs Review' };
+const LI_CONSTANTS = { Constants: [{ json: { ...CONTROL, validLabels: ['Taxes', 'Receipts'] } }] };
+const CONTROL_LABELS = [
+  { name: 'LLM Reviewed', id: 'Label_19' }, { name: 'LLM Categorized', id: 'Label_20' },
+  { name: 'Needs Review', id: 'Label_21' },
+];
 
 test('Build label index maps names to IDs and finds LLM Reviewed', () => {
   const out = runNode('Build label index', {
     json: { labels: [
-      { name: 'LLM Reviewed', id: 'Label_19' },
+      ...CONTROL_LABELS,
       { name: 'Receipts', id: 'Label_5' },
       { name: 'Taxes', id: 'Label_7' },
     ] },
     nodes: LI_CONSTANTS,
   });
   assert.equal(out[0].json.reviewedLabelId, 'Label_19');
+  assert.equal(out[0].json.categorizedLabelId, 'Label_20');
+  assert.equal(out[0].json.needsReviewLabelId, 'Label_21');
   assert.equal(out[0].json.labelNameToId.Receipts, 'Label_5');
 });
 
@@ -33,7 +40,8 @@ test('Build label index maps names to IDs and finds LLM Reviewed', () => {
 test('Build label index fails loudly when LLM Reviewed is missing', () => {
   assert.throws(
     () => runNode('Build label index', {
-      json: { labels: [{ name: 'Receipts', id: 'Label_5' }, { name: 'Taxes', id: 'Label_7' }] },
+      json: { labels: [...CONTROL_LABELS.filter((l) => l.name !== 'LLM Reviewed'),
+        { name: 'Receipts', id: 'Label_5' }, { name: 'Taxes', id: 'Label_7' }] },
       nodes: LI_CONSTANTS,
     }),
     (err) => /missing 1 label\(s\)/.test(err.message) && /"LLM Reviewed"/.test(err.message)
@@ -44,7 +52,7 @@ test('Build label index fails loudly when LLM Reviewed is missing', () => {
 test('Build label index fails loudly when a category label is missing from Gmail', () => {
   assert.throws(
     () => runNode('Build label index', {
-      json: { labels: [{ name: 'LLM Reviewed', id: 'Label_19' }, { name: 'Taxes', id: 'Label_7' }] },
+      json: { labels: [...CONTROL_LABELS, { name: 'Taxes', id: 'Label_7' }] },
       nodes: LI_CONSTANTS,
     }),
     (err) => /"Receipts"/.test(err.message) && !/"Taxes"/.test(err.message),
@@ -55,9 +63,9 @@ test('Build label index lists every missing label once', () => {
   assert.throws(
     () => runNode('Build label index', {
       json: { labels: [] },
-      nodes: { Constants: [{ json: { validLabels: ['Receipts', 'Receipts', 'Taxes'] } }] },
+      nodes: { Constants: [{ json: { ...CONTROL, validLabels: ['Receipts', 'Receipts', 'Taxes'] } }] },
     }),
-    (err) => /missing 3 label\(s\)/.test(err.message),
+    (err) => /missing 5 label\(s\)/.test(err.message),   // 3 control + 2 distinct categories
   );
 });
 
@@ -174,16 +182,17 @@ function pdContext({ content, ids, batchEmails, staticData = {} }) {
       'Build prompt': [{ json: { ids, batchEmails } }],
       'Build label index': [{ json: {
         labelNameToId: { Receipts: 'Label_5' }, reviewedLabelId: 'Label_19',
+        categorizedLabelId: 'Label_20', needsReviewLabelId: 'Label_21',
       } }],
-      Constants: [{ json: { validLabels: ['Receipts'] } }],
+      Constants: [{ json: { validLabels: ['Receipts'], trashAgeDays: 30, labelOnDeferred: [] } }],
     },
   };
 }
 
 test('Parse decisions: valid keep + trash decisions resolve correctly', () => {
   const emails = [
-    { id: 'a', sender: 'sa', subject: 'ta' },
-    { id: 'b', sender: 'sb', subject: 'tb' },
+    { id: 'a', sender: 'sa', subject: 'ta', age_days: 40 },
+    { id: 'b', sender: 'sb', subject: 'tb', age_days: 40 },   // old enough to trash
   ];
   const out = runNode('Parse decisions', pdContext({
     content: JSON.stringify({ decisions: [
@@ -234,7 +243,7 @@ test('Parse decisions: a message the model omitted defaults to a safe keep', () 
 });
 
 test('Parse decisions: malformed JSON falls back to regex extraction', () => {
-  const emails = [{ id: 'a', sender: 'sa', subject: 'ta' }];
+  const emails = [{ id: 'a', sender: 'sa', subject: 'ta', age_days: 40 }];
   const out = runNode('Parse decisions', pdContext({
     content: 'noise {"id": "a", "action": "trash", "label": null} more noise',
     ids: ['a'], batchEmails: emails,
@@ -320,12 +329,12 @@ test('Re-chain gate: fires once — only when total > 0 AND more remain', () => 
 
 // ─── One-or-two-label contract (GCA-6) ──────────────────────────────────────
 
-function pd2({ content, ids }) {
-  const ctx = pdContext({ content, ids, batchEmails: ids.map((id) => ({ id, sender: 's', subject: 't' })) });
+function pd2({ content, ids, age = 40 }) {
+  const ctx = pdContext({ content, ids, batchEmails: ids.map((id) => ({ id, sender: 's', subject: 't', age_days: age })) });
   ctx.nodes['Build label index'] = [{ json: {
     labelNameToId: { Receipts: 'Label_5', Travel: 'Label_6', Taxes: 'Label_7' }, reviewedLabelId: 'Label_19',
   } }];
-  ctx.nodes.Constants = [{ json: { validLabels: ['Receipts', 'Travel', 'Taxes'] } }];
+  ctx.nodes.Constants = [{ json: { validLabels: ['Receipts', 'Travel', 'Taxes'], trashAgeDays: 30, labelOnDeferred: [] } }];
   return ctx;
 }
 const byId = (out) => Object.fromEntries(out.map((o) => [o.json.id, o.json]));
@@ -374,13 +383,13 @@ test('Parse decisions: a third label is trimmed and an unknown one dropped, with
   assert.match(errs, /dropped unknown label\(s\) for b: Nope/);
 });
 
-test('Parse decisions: trash ignores any labels; regex fallback reads a labels array', () => {
+test('Parse decisions: eligible trash keeps its labels in the plan; regex fallback reads a labels array', () => {
   const content = 'oops {"id": "a", "action": "keep", "labels": ["Travel", "Receipts"]} '
     + '{"id": "b", "action": "trash", "labels": ["Taxes"]} not json';
   const out = byId(runNode('Parse decisions', pd2({ ids: ['a', 'b'], content })));
   assert.deepEqual(out.a.labels, ['Travel', 'Receipts']);
-  assert.deepEqual(out.b.labels, []);
-  assert.equal(out.b.labelId, null);
+  assert.equal(out.b.action, 'trash');
+  assert.deepEqual(out.b.labels, ['Taxes']);   // not applied: the trash branch stamps control labels only
 });
 
 test('Tally counts each label of a two-label keep and reports multi-labelled keeps', () => {
@@ -396,4 +405,84 @@ test('Tally counts each label of a two-label keep and reports multi-labelled kee
   assert.match(j.body, /Kept \(labeled\): 3 \(1 with 2 labels\)/);
   assert.match(j.body, /Receipts: 3/);
   assert.match(j.body, /Travel: 1/);
+});
+
+// ─── Age gate (GCA-2) ────────────────────────────────────────────────────────
+// trashAgeDays = 30: an email exactly 30 days old IS trash-evaluated (>=); one day
+// younger is not. A deferred trash verdict is kept, gets LLM Categorized, and is
+// NOT stamped LLM Reviewed, so the older_than arm brings it back when it ages.
+
+function gate(emails, decisions, { labelOnDeferred = [] } = {}) {
+  const ctx = pdContext({
+    content: JSON.stringify({ decisions }),
+    ids: emails.map((e) => e.id),
+    batchEmails: emails.map((e) => ({ sender: 's', subject: 't', ...e })),
+  });
+  ctx.nodes['Build label index'][0].json.labelNameToId = {
+    Receipts: 'Label_5', Politics: 'Label_8', Travel: 'Label_6' };
+  ctx.nodes.Constants = [{ json: { validLabels: ['Receipts', 'Politics', 'Travel'], trashAgeDays: 30, labelOnDeferred } }];
+  return Object.fromEntries(runNode('Parse decisions', ctx).map((o) => [o.json.id, o.json]));
+}
+
+test('Age gate boundary: 29 days defers, exactly 30 is trashed, 31 is trashed, unknown age defers', () => {
+  const out = gate(
+    [{ id: 'd29', age_days: 29 }, { id: 'd30', age_days: 30 }, { id: 'd31', age_days: 31 }, { id: 'dnull', age_days: null }],
+    ['d29', 'd30', 'd31', 'dnull'].map((id) => ({ id, action: 'trash', labels: ['Receipts'] })),
+  );
+  assert.deepEqual([out.d29.action, out.d29.deferred, out.d29.stampReviewed], ['keep', true, false]);
+  assert.deepEqual([out.d30.action, out.d30.deferred, out.d30.stampReviewed], ['trash', false, true]);
+  assert.deepEqual([out.d31.action, out.d31.deferred, out.d31.stampReviewed], ['trash', false, true]);
+  assert.deepEqual([out.dnull.action, out.dnull.deferred], ['keep', true]);
+  for (const id of ['d29', 'd30', 'd31', 'dnull']) assert.equal(out[id].verdict, 'trash');
+});
+
+test('Age gate: a young keep is categorised but not stamped reviewed', () => {
+  const out = gate([{ id: 'y', age_days: 5 }], [{ id: 'y', action: 'keep', labels: ['Receipts'] }]);
+  assert.deepEqual([out.y.action, out.y.labelId, out.y.stampReviewed], ['keep', 'Label_5', false]);
+});
+
+test('Age gate: an old email that already has a verdict is not re-judged', () => {
+  // Arrives via the categorisation arm (e.g. an upgrade before seeding): it is
+  // categorised, but its trash verdict is not acted on a second time.
+  const out = gate([{ id: 'o', age_days: 400, labelIds: ['Label_19'] }],
+                   [{ id: 'o', action: 'trash', labels: ['Receipts'] }]);
+  assert.deepEqual([out.o.action, out.o.deferred, out.o.stampReviewed], ['keep', true, false]);
+});
+
+test('Deferred trash gets no category label (filler suppressed) unless exempted per label', () => {
+  const plain = gate([{ id: 'x', age_days: 3 }], [{ id: 'x', action: 'trash', labels: ['Receipts'] }]);
+  assert.deepEqual(plain.x.labels, []);
+  assert.equal(plain.x.labelId, null);                 // -> no-category branch, no Needs Review
+  assert.equal(plain.x.suppressedLabel, 'Receipts');
+
+  const exempt = gate([{ id: 'x', age_days: 3 }],
+    [{ id: 'x', action: 'trash', labels: ['Politics', 'Receipts'] }], { labelOnDeferred: ['Politics'] });
+  assert.deepEqual(exempt.x.labels, ['Politics']);     // per label: only the exempt one survives
+  assert.deepEqual(exempt.x.labelIds, ['Label_8']);
+  assert.equal(exempt.x.deferred, true);
+  assert.equal(exempt.x.suppressedLabel, null);
+});
+
+test('A missing decision on old mail is stamped reviewed (no endless loop); on young mail it is not', () => {
+  const out = gate([{ id: 'old', age_days: 90 }, { id: 'new', age_days: 2 }], []);
+  assert.deepEqual([out.old.action, out.old.labelId, out.old.stampReviewed], ['keep', null, true]);
+  assert.deepEqual([out.new.action, out.new.stampReviewed], ['keep', false]);
+  assert.equal(out.old.deferred, false);               // -> gets Needs Review
+});
+
+test('Tally separates deferred trash and genuine failures from real keeps', () => {
+  const ctx = tallyCtx([
+    { action: 'keep', labels: ['Receipts'], label: 'Receipts', labelId: 'Label_5' },
+    { action: 'keep', deferred: true, labels: [], label: null, labelId: null },
+    { action: 'keep', deferred: true, labels: ['Politics'], label: 'Politics', labelId: 'Label_8' },
+    { action: 'keep', labels: [], label: null, labelId: null },      // model failure
+    { action: 'trash' },
+  ], 5);
+  ctx.nodes.Constants[0].json.trashAgeDays = 30;
+  const j = runNode('Tally', ctx)[0].json;
+  assert.deepEqual([j.kept, j.deferred, j.trashed, j.uncategorized], [2, 2, 1, 1]);
+  assert.match(j.title, /2 kept, 2 deferred, 1 trashed of 5/);
+  assert.match(j.body, /Deferred trash \(under 30 days, re-judged later\): 2/);
+  assert.match(j.body, /Needs Review \(no usable label\): 1/);
+  assert.match(j.body, /Politics: 1/);                 // exempt deferred label still counted
 });

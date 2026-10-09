@@ -17,14 +17,19 @@ to keep doing a small weekly pass afterwards.
 
 ## Features
 
-- **LLM-powered triage** — every old email is classified *keep* or *trash*,
-  using rules you control. A kept email gets one category label, or two when
+- **LLM-powered triage** — every email is classified *keep* or *trash* using
+  rules you control, but only mail at least `TRASH_AGE_DAYS` old (default 30)
+  is ever trashed. Younger mail is categorised now and judged later, once the
+  age signals in your rules (e.g. "verification codes: keep only if recent")
+  actually apply. A kept email gets one category label, or two when
   two categories are genuinely true of it (a hotel booking receipt is both
   travel and a receipt). Never a third, and never a second to avoid choosing.
 - **Self-rechaining loop** — one trigger drains an arbitrarily large backlog
   over many short, crash-safe executions instead of one fragile mega-run.
-- **Idempotent** — every processed message is stamped with an `LLM Reviewed`
-  label, so re-runs never re-classify the same mail.
+- **Idempotent** — two bookkeeping labels, `LLM Categorized` (a category was
+  decided) and `LLM Reviewed` (a verdict was acted on), keep re-runs from
+  repeating work; `Needs Review` collects the few emails the model could not
+  categorise.
 - **Model-agnostic** — talks to any OpenAI-compatible chat-completions endpoint
   (Ollama, llama.cpp, vLLM, LM Studio, or the OpenAI API).
 - **Self-contained export** — the classification rules and label catalog are
@@ -51,13 +56,16 @@ Two entry points feed the same graph:
   classification rules and label catalog. It also clears the cross-batch
   accumulator held in workflow static data.
 - **List labels → Build label index** — fetches your Gmail labels and builds a
-  name→ID map, including the ID of the `LLM Reviewed` bookkeeping label. If
-  `LLM Reviewed` or any label in your catalog is missing from Gmail, it stops
+  name→ID map, including the three [control labels](#the-control-labels). If a
+  control label or any label in your catalog is missing from Gmail, it stops
   the run here with an error naming them, before any mail is fetched (see
   [step 3](#3-create-the-gmail-labels)).
-- **List messages** — a paginated Gmail search (default
-  `older_than:30d -label:llm-reviewed`) returning up to `PER_RUN_LIMIT`
-  message IDs.
+- **List messages** — a paginated Gmail search returning up to
+  `PER_RUN_LIMIT` message IDs. The default is the union of two passes, each
+  arm parenthesised:
+  `(-label:"LLM Categorized") OR (older_than:30d -label:"LLM Reviewed")`,
+  meaning "anything not yet categorised, at any age" plus "anything old enough
+  that has no verdict yet".
 - **Extract IDs → Get metadata → Parse metadata** — for each message, fetches
   the `From` / `Subject` / `Date` headers and snippet, and derives the
   message's age in days and whether it carries a `List-Unsubscribe` header (a
@@ -78,23 +86,31 @@ Messages are split into batches of 20 and looped:
   is malformed) and *validates* every decision: unknown IDs, duplicates, bad
   actions, and invalid labels are rejected; any message the model omitted is
   defaulted to a safe *keep*. Each decision carries a `labels` array (a legacy
-  scalar `label` is still accepted); a third label is cut, and an unknown second
-  label is dropped with a parse error.
+  scalar `label` is still accepted); a third label is cut, and an unknown
+  label is dropped with a parse error. It then applies the **age gate**: a
+  *trash* verdict on an email younger than `TRASH_AGE_DAYS` (or already
+  carrying `LLM Reviewed`) is **deferred**, not acted on: the email is kept,
+  marked `LLM Categorized` only, and judged again once it is old enough.
+  Deferred trash gets no category label unless that label is listed in
+  `LABEL_ON_DEFERRED`.
 - **Route action** — a Switch sends each message down one of three branches:
   - **Trash message → Mark reviewed (post-trash)** — trashes the message, then
-    stamps it `LLM Reviewed`.
-  - **Add label** — applies the chosen category label(s) *and* `LLM Reviewed`
-    in a single Gmail call. The run summary counts an email under each of its
-    labels and reports how many kept emails got two.
-  - **Mark reviewed (skip)** — for a kept message whose label could not be
-    resolved; stamps `LLM Reviewed` only, so it is not re-evaluated forever.
+    stamps it `LLM Reviewed` and `LLM Categorized`.
+  - **Add label** — applies the chosen category label(s) and `LLM Categorized`
+    in a single Gmail call, plus `LLM Reviewed` only if the email was old enough
+    for its verdict to count.
+  - **Mark needs-review** — for an email with no category to apply: deferred
+    trash (stamped `LLM Categorized` only) or a genuine failure where the model
+    gave no usable label (also `Needs Review`, so a human can find it). Old
+    failures also get `LLM Reviewed` so they are not re-evaluated forever.
 
 ### 4. Summary and re-chain
 
 When every batch in the run is done:
 
-- **Tally** — counts kept vs. trashed and builds a summary, broken down by
-  label.
+- **Tally** — counts kept, deferred, trashed and needs-review emails and
+  builds a summary broken down by label (an email with two labels counts under
+  both).
 - **ntfy: summary** — sends one push notification per run.
 - **Re-chain** — if the Gmail search still returned a *full* batch, the
   workflow POSTs its own webhook to start a fresh execution.
@@ -107,28 +123,36 @@ restart mid-run loses all progress. Instead, each run handles a bounded
 **Re-chain webhook** to launch the next run.
 
 This works because the loop is **naturally resumable**: every processed message
-leaves the candidate pool (it is trashed, or it gains the `LLM Reviewed`
-label), so the next run's Gmail search returns a *different* set with no
-overlap. If a run dies, the next one simply picks up whatever is still
+leaves the candidate pool (it is trashed, or it gains `LLM Categorized` and,
+once old enough, `LLM Reviewed`), so the next run's Gmail search returns a
+*different* set with no overlap. If a run dies, the next one simply picks up whatever is still
 unprocessed.
 
 **Kill switch:** deactivate the workflow in n8n. The re-chain webhook
 unregisters, the next re-trigger call gets a 404, and the chain stops cleanly.
 
-## The `LLM Reviewed` label
+## The control labels
 
-`LLM Reviewed` is a bookkeeping label the workflow applies to every message it
-touches — kept, trashed, or skipped. **You create it once in Gmail before the
-first run** ([step 3](#3-create-the-gmail-labels)); the workflow never creates
-labels, and stops before classifying anything if it is missing. The default Gmail search
-excludes it (`-label:llm-reviewed`), which makes the whole system idempotent:
+Three bookkeeping labels, which **you create once in Gmail before the first
+run** ([step 3](#3-create-the-gmail-labels)); the workflow never creates
+labels, and stops before classifying anything if one is missing:
 
-- A message is never classified twice.
-- The re-chain makes guaranteed forward progress.
-- Re-running the workflow after a backlog is cleared only ever picks up genuinely
-  new mail.
+| Label | Meaning | Applied to |
+|---|---|---|
+| `LLM Categorized` | A category decision was made | every email the workflow touches, at any age |
+| `LLM Reviewed` | A trash/keep verdict was **acted on** | only emails at least `TRASH_AGE_DAYS` old |
+| `Needs Review` | Kept, but the model gave no usable category | genuine failures only (never deferred trash) |
 
-To exempt a message from the LLM entirely, apply `LLM Reviewed` to it by hand.
+Keeping *categorised* and *reviewed* separate is what makes the age split safe.
+If a 5-day-old email were stamped `LLM Reviewed`, it would never be looked at
+again, so it would become permanently trash-exempt. Instead a young email gets
+its category plus `LLM Categorized`, then the second query arm picks it up once
+it is old enough, and it gets a real verdict.
+
+The two query arms exclude these labels, which makes the system idempotent:
+nothing is categorised twice, nothing is judged twice, and the re-chain always
+makes forward progress. To exempt a message from the LLM entirely, apply both
+`LLM Categorized` and `LLM Reviewed` to it by hand.
 
 ## Repository layout
 
@@ -184,7 +208,9 @@ Edit the configuration block at the top of `build_workflow.py`:
 | `N8N_BASE_URL` | URL n8n can reach itself on (for the re-chain webhook). |
 | `NTFY_SERVER`, `NTFY_TOPIC` | Push notifications. Set `NTFY_TOPIC = ""` to disable. |
 | `PER_RUN_LIMIT` | Emails per execution before re-chaining. |
-| `GMAIL_QUERY` | The Gmail search selecting candidate mail. |
+| `TRASH_AGE_DAYS` | Default `30`: only mail at least this old is trash-evaluated; younger mail is categorised now and judged later. Also sets the `older_than` arm of the query. |
+| `LABEL_ON_DEFERRED` | Default `[]`: categories to apply even on a *deferred* trash verdict (e.g. `["Politics"]` for mail you want labelled now and trashed later). Others are suppressed on deferred trash because the model is usually picking filler. |
+| `GMAIL_QUERY` | The Gmail search selecting candidate mail. The default is the two-arm union built from the control-label names and `TRASH_AGE_DAYS`; keep both arms parenthesised if you change it. |
 | `SCHEDULE_CRON`, `TIMEZONE` | When the weekly trigger fires. |
 
 Then tune `config/rules.md` and `config/labels.yaml` (see below).
@@ -195,7 +221,8 @@ The workflow **does not create labels**; it only applies labels that already
 exist in your Gmail. Before the first run, create (Gmail → Settings → Labels →
 *Create new label*), with names exactly as written:
 
-- **`LLM Reviewed`**, the bookkeeping label;
+- the three control labels: **`LLM Reviewed`**, **`LLM Categorized`** and
+  **`Needs Review`**;
 - **every label in `config/labels.yaml`**, both the `existing` and the
   `auto_create` entries.
 
@@ -222,6 +249,38 @@ Save and activate the workflow.
 Trigger the workflow manually once ("Execute Workflow"). It will process the
 first `PER_RUN_LIMIT` emails and, if more remain, re-chain automatically until
 the backlog is clear. After that the weekly schedule keeps the inbox tidy.
+
+On a fresh install the first pass covers the whole mailbox, since nothing is
+categorised yet. That is expected, but it is one LLM call per 20 emails, so a
+large mailbox takes a while.
+
+### Upgrading from an earlier version (seed `LLM Categorized`)
+
+Earlier versions used `LLM Reviewed` alone. After upgrading, the new
+categorisation arm (`-label:"LLM Categorized"`) matches **every** message,
+including all the mail the old version already handled, so the first run
+would re-classify your whole history. Seed the new label first. It is a
+Gmail bulk action, needs no LLM, and runs in the Gmail web UI with your own
+login (no server access):
+
+1. Finish or stop any run of the old version (deactivate it), so nothing is
+   stamped `LLM Reviewed` behind your back.
+2. Create the new control labels (`LLM Categorized`, `Needs Review`;
+   [step 3](#3-create-the-gmail-labels)).
+3. Gmail → Settings → General → **Conversation view: off**, then Save. With it
+   off, search results and bulk labels apply per **message**; with it on they
+   apply to whole threads, which would stamp newer, unprocessed replies too.
+4. Search for `label:"LLM Reviewed" -label:"LLM Categorized"`, tick the
+   select-all box, click **"Select all conversations that match this
+   search"**, then **Label as → LLM Categorized**. Large mailboxes are labelled
+   in the background; repeat the search until it returns nothing.
+5. Turn conversation view back on if you use it, then import the new
+   `gmail-cleanup.json` and activate it.
+
+Already-reviewed mail is now categorised as far as the workflow is concerned,
+and only genuinely new or uncategorised mail goes to the LLM. Messages the old
+version reviewed but never labelled keep no category. Search
+`label:"LLM Reviewed" has:nouserlabels` to find any you want to file by hand.
 
 ## Customizing the classification
 
@@ -253,6 +312,13 @@ A few non-obvious choices, documented so they are not "fixed" by accident:
 - **ID-less emails are filtered early.** A failed `Get metadata` call yields an
   item with no message ID; `Build prompt` drops these so they cannot desync the
   prompt from the decision parser.
+- **Deferred, not dropped.** A trash verdict on young mail is not acted on
+  but is not lost either: the email keeps no `LLM Reviewed` stamp, so the
+  `older_than` arm returns it for a fresh verdict once it is old enough.
+  Exactly `TRASH_AGE_DAYS` old counts as old enough; unknown age never does.
+- **Both query arms are parenthesised.** Gmail accepts `-label:"A" OR (...)`
+  without complaint but returns only the first arm, which would silently stop
+  all trashing. A structural test pins the exact query.
 - **Notification failure is non-fatal.** The `ntfy` node continues on error — a
   missed push notification never breaks the run or the chain.
 
