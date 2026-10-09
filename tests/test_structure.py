@@ -6,6 +6,8 @@ environment-specific value, or forgets to regenerate gmail-cleanup.json will
 fail CI here. Logic inside the Code nodes is covered by codenodes.test.mjs.
 """
 import json
+import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -35,6 +37,24 @@ def _targets(node_name, output_index=None):
     if output_index is not None:
         outputs = [outputs[output_index]] if output_index < len(outputs) else []
     return [link["node"] for output in outputs for link in output]
+
+
+def _build_variant(tmp_path, **settings):
+    """Generate the workflow with some configuration constants overridden.
+
+    Runs a copy of build_workflow.py (plus config/) in tmp_path with each
+    `NAME = value` assignment rewritten, so build-time switches can be tested
+    without touching the committed gmail-cleanup.json."""
+    shutil.copytree(REPO / "config", tmp_path / "config")
+    script = (REPO / "build_workflow.py").read_text()
+    for name, value in settings.items():
+        script, n = re.subn(rf"^{name}\s*=.*$", f"{name} = {value!r}", script,
+                            count=1, flags=re.M)
+        assert n == 1, f"no top-level {name} = ... in build_workflow.py"
+    (tmp_path / "build_workflow.py").write_text(script)
+    subprocess.run([sys.executable, "build_workflow.py"], cwd=tmp_path,
+                   check=True, capture_output=True)
+    return json.loads((tmp_path / "gmail-cleanup.json").read_text())
 
 
 # ─── Generator + drift ───────────────────────────────────────────────────────
@@ -146,6 +166,23 @@ def test_tally_fans_out_to_both_gates_and_gates_lead_to_their_actions():
     assert set(_targets("Tally")) == {"ntfy gate", "Re-chain gate"}
     assert _targets("ntfy gate") == ["ntfy: summary"]
     assert _targets("Re-chain gate") == ["Re-trigger next batch"]
+
+
+def test_empty_ntfy_topic_leaves_the_ntfy_nodes_out(tmp_path):
+    """NTFY_TOPIC = "" disables notifications. It used to leave the node in
+    place, POSTing every summary to the bare server URL (https://ntfy.sh/)."""
+    wf = _build_variant(tmp_path, NTFY_TOPIC="")
+    names = {n["name"] for n in wf["nodes"]}
+    assert names == EXPECTED_NODES - {"ntfy gate", "ntfy: summary"}
+    assert "ntfy" not in json.dumps(wf["connections"])
+    tally = [link["node"] for out in wf["connections"]["Tally"]["main"] for link in out]
+    assert tally == ["Re-chain gate"]
+
+
+def test_a_set_ntfy_topic_posts_to_that_topic():
+    payload_url = NODES["ntfy: summary"]["parameters"]["url"]
+    assert payload_url == "https://ntfy.sh/change-me-to-a-private-topic"
+    assert _targets("Tally") == ["ntfy gate", "Re-chain gate"]
 
 
 # ─── Config embedding ────────────────────────────────────────────────────────

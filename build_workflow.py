@@ -32,7 +32,8 @@ LLM_MODEL   = "qwen3"
 LLM_DISABLE_THINKING = True
 
 # ntfy push notification for the per-run summary. ntfy.sh is the free public
-# server — pick a long, hard-to-guess topic. Set NTFY_TOPIC = "" to disable.
+# server — pick a long, hard-to-guess topic. Set NTFY_TOPIC = "" to disable: the
+# ntfy nodes are then left out of the workflow entirely.
 NTFY_SERVER = "https://ntfy.sh"
 NTFY_TOPIC  = "change-me-to-a-private-topic"
 
@@ -546,7 +547,6 @@ constants_js = (
         "model": LLM_MODEL,
         "llmApiUrl": LLM_API_URL,
         "disableThinking": LLM_DISABLE_THINKING,
-        "ntfyTopic": NTFY_TOPIC,
         "rulesMd": rules_md,
         "existingLabels": existing,
         "autoCreateLabels": auto_create,
@@ -816,40 +816,41 @@ nodes.append({
 # 17. Tally
 nodes.append(code_node("Tally", "n-tally", TALLY_JS, [3100, 600], runOnce=True))
 
-# 17b. ntfy gate — drops the spurious zero-total Tally re-fires so ntfy sends once.
-nodes.append(code_node("ntfy gate", "n-ntfy-gate", NTFY_GATE_JS, [3320, 600], runOnce=True))
+if NTFY_TOPIC:
+    # 17b. ntfy gate — drops the spurious zero-total Tally re-fires so ntfy sends once.
+    nodes.append(code_node("ntfy gate", "n-ntfy-gate", NTFY_GATE_JS, [3320, 600], runOnce=True))
 
-# 18. ntfy
-nodes.append({
-    "parameters": {
-        "method": "POST",
-        "url": f"{NTFY_SERVER}/{NTFY_TOPIC}",
-        "sendHeaders": True,
-        "headerParameters": {
-            "parameters": [
-                {"name": "X-Title", "value": "={{ $json.title }}"},
-                # Low priority (silent) for mid-drain runs; high for the final one.
-                {"name": "X-Priority", "value": "={{ $json.moreRemain ? '2' : '4' }}"},
-                {"name": "X-Tags", "value": "envelope,broom"},
-            ]
+    # 18. ntfy
+    nodes.append({
+        "parameters": {
+            "method": "POST",
+            "url": f"{NTFY_SERVER}/{NTFY_TOPIC}",
+            "sendHeaders": True,
+            "headerParameters": {
+                "parameters": [
+                    {"name": "X-Title", "value": "={{ $json.title }}"},
+                    # Low priority (silent) for mid-drain runs; high for the final one.
+                    {"name": "X-Priority", "value": "={{ $json.moreRemain ? '2' : '4' }}"},
+                    {"name": "X-Tags", "value": "envelope,broom"},
+                ]
+            },
+            "sendBody": True,
+            "contentType": "raw",
+            "rawContentType": "text/plain",
+            "body": "={{ $json.body }}",
+            "options": {"timeout": 10000},
         },
-        "sendBody": True,
-        "contentType": "raw",
-        "rawContentType": "text/plain",
-        "body": "={{ $json.body }}",
-        "options": {"timeout": 10000},
-    },
-    "id": "n-ntfy",
-    "name": "ntfy: summary",
-    "type": "n8n-nodes-base.httpRequest",
-    "typeVersion": 4.2,
-    "position": [3540, 600],
-    "retryOnFail": True,
-    "maxTries": 3,
-    "waitBetweenTries": 5000,
-    # A notification failure must never error the workflow or break the chain.
-    "onError": "continueRegularOutput",
-})
+        "id": "n-ntfy",
+        "name": "ntfy: summary",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [3540, 600],
+        "retryOnFail": True,
+        "maxTries": 3,
+        "waitBetweenTries": 5000,
+        # A notification failure must never error the workflow or break the chain.
+        "onError": "continueRegularOutput",
+    })
 
 # 19. Re-chain gate — emits an item only when more emails remain.
 nodes.append(code_node("Re-chain gate", "n-rechain-gate", RECHAIN_GATE_JS, [3320, 780], runOnce=True))
@@ -910,13 +911,15 @@ connections = {
     "Mark needs-review": {"main": [[{"node": "Merge actions", "type": "main", "index": 0}]]},
     "Merge actions": {"main": [[{"node": "Batch (20)", "type": "main", "index": 0}]]},
     "Tally": {"main": [[
-        {"node": "ntfy gate", "type": "main", "index": 0},
         {"node": "Re-chain gate", "type": "main", "index": 0},
     ]]},
-    "ntfy gate": {"main": [[{"node": "ntfy: summary", "type": "main", "index": 0}]]},
     "Re-chain gate": {"main": [[{"node": "Re-trigger next batch", "type": "main", "index": 0}]]},
     "Re-chain webhook": {"main": [[{"node": "Constants", "type": "main", "index": 0}]]},
 }
+if NTFY_TOPIC:
+    # ntfy gate first, matching the canvas (it sits above Re-chain gate).
+    connections["Tally"]["main"][0].insert(0, {"node": "ntfy gate", "type": "main", "index": 0})
+    connections["ntfy gate"] = {"main": [[{"node": "ntfy: summary", "type": "main", "index": 0}]]}
 
 # Need to also include Build label index in the flow — it's downstream of List labels
 # But Constants only has 1 main output, so let me route Build label index inline
