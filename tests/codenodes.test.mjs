@@ -109,6 +109,29 @@ test('Build prompt drops id-less emails (regression: failed-metadata items)', ()
   assert.equal(out[0].json.batchEmails.length, 2);
 });
 
+test('Build prompt never emits a lone surrogate (emoji cut mid-pair by the 300-char slice)', () => {
+  // 150 two-code-unit emoji = 300 code units; one leading char pushes the
+  // last emoji across the cut, leaving its high surrogate alone at index 299.
+  const snippet = 'x' + '🐆'.repeat(150);
+  const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  assert.ok(lone.test(snippet.slice(0, 300)), 'fixture must reproduce the cut');
+
+  const out = runNode('Build prompt', {
+    input: [
+      { json: { id: 'cut', sender: 's', subject: 'zoo 🐅', snippet } },
+      { json: { id: 'ok', sender: 's', subject: 'intact', snippet: 'party 🎉 tonight' } },
+    ],
+    nodes: { Constants: CONSTANTS },
+  });
+  const p = out[0].json.prompt;
+  assert.ok(!lone.test(p), 'prompt still contains a lone surrogate');
+  assert.ok(p.includes('�'), 'the broken half becomes U+FFFD');
+  assert.ok(p.includes('party 🎉 tonight') && p.includes('zoo 🐅'), 'intact emoji survive');
+  // What llama-server actually receives: the JSON body must round-trip.
+  assert.doesNotThrow(() => JSON.parse(JSON.stringify({ content: p })));
+  assert.equal(JSON.stringify(p).includes('\\ud83d"'), false);
+});
+
 // ─── Parse decisions ─────────────────────────────────────────────────────────
 
 function pdContext({ content, ids, batchEmails, staticData = {} }) {
