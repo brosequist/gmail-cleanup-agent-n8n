@@ -204,3 +204,18 @@ def test_settings_are_sane():
     settings = WORKFLOW["settings"]
     assert settings["executionOrder"] == "v1"
     assert settings.get("timezone")
+
+
+def test_llm_request_disables_thinking_by_default():
+    """Reasoning models return EMPTY content (finish_reason length) unless
+    thinking is disabled; the flag rides in Constants so endpoints that reject
+    unknown fields (the OpenAI API) can turn it off in one place."""
+    body = NODES["Ask LLM"]["parameters"]["jsonBody"]
+    assert "chat_template_kwargs: { enable_thinking: false }" in body
+    assert "json.disableThinking" in body
+    assert '"disableThinking": true' in NODES["Constants"]["parameters"]["jsCode"]
+
+
+def test_add_label_applies_every_category_label_plus_reviewed():
+    body = NODES["Add label"]["parameters"]["jsonBody"]
+    assert "...($json.labelIds" in body and "$json.reviewedLabelId" in body
