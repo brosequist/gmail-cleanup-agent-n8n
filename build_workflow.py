@@ -93,6 +93,14 @@ GMAIL_QUERY = (f'(-label:"{CATEGORIZED_LABEL}") OR '
 SCHEDULE_CRON = "0 3 * * 6"   # Saturdays at 03:00
 TIMEZONE      = "America/New_York"
 
+# A big backlog drains over many re-chained runs and can outlast a week. A
+# scheduled run that fires while a drain is still going is skipped, so two
+# chains never judge the same mail at once. Each drain run refreshes a marker
+# when it ends; a marker older than this many hours is treated as a dead drain
+# (n8n restarted mid-chain, say) and no longer blocks the schedule. Keep it well
+# above the longest single run.
+DRAIN_STALE_HOURS = 24
+
 RECHAIN_WEBHOOK_PATH = "gmail-cleanup-rechain"
 # Fixed so the generated JSON is deterministic (CI checks it for drift).
 # n8n assigns its own ID on import; this value is just a stable placeholder.
@@ -355,8 +363,10 @@ for (const id of inputIds) {
 
 // Accumulate decisions across batches for Tally
 const sd = $getWorkflowStaticData('global');
-if (!sd.runResults) sd.runResults = [];
-for (const p of plan) sd.runResults.push(p);
+// Accumulate under this execution's own key (see Constants).
+if (!sd.runs) sd.runs = {};
+if (!sd.runs[$execution.id]) sd.runs[$execution.id] = { startedAt: Date.now(), items: [] };
+for (const p of plan) sd.runs[$execution.id].items.push(p);
 
 return plan.map(p => ({ json: { ...p, parseErrors: errors } }));
 """
@@ -395,7 +405,8 @@ return [{ json: {
 
 TALLY_JS = r"""
 const sd = $getWorkflowStaticData('global');
-const items = sd.runResults || [];
+const run = (sd.runs || {})[$execution.id];
+const items = run ? run.items : [];
 const perRunLimit = $('Constants').first().json.perRunLimit;
 const allKeeps = items.filter(x => x.action === 'keep');
 const kept = allKeeps.filter(x => !x.deferred);          // real keeps only
@@ -432,8 +443,10 @@ const body = `Run finished.\nProcessed: ${total}\nKept (labeled): ${kept.length}
   `\nTrashed: ${trashed.length}` +
   (uncategorized.length ? `\nNeeds Review (no usable label): ${uncategorized.length}` : '') +
   `\n\nKept by label:\n${labelLines || '  (none)'}\n\n${statusLine}`;
-// Clear for next run
-sd.runResults = [];
+// Drop this run's accumulator, and record whether a drain is in progress: the
+// marker is what makes "Skip if draining" hold back the weekly schedule.
+if (sd.runs) delete sd.runs[$execution.id];
+sd.drainActiveAt = moreRemain ? Date.now() : null;
 return [{ json: { title, body, total, kept: kept.length, deferred: deferred.length, trashed: trashed.length,
                   uncategorized: uncategorized.length, multiLabelled, moreRemain } }];
 """
@@ -442,7 +455,7 @@ return [{ json: { title, body, total, kept: kept.length, deferred: deferred.leng
 RECHAIN_GATE_JS = r"""
 // n8n skips a node that receives zero input items, so returning [] ends the chain.
 // total>0 is true only on the genuine Tally run (spurious SplitInBatches "done"
-// re-fires see cleared runResults => total 0), so this fires Re-trigger exactly
+// re-fires find this run's accumulator deleted => total 0), so this fires Re-trigger exactly
 // once — and only when the query still has a full batch's worth queued.
 const t = $input.first().json;
 return (t && t.total > 0 && t.moreRemain) ? [{ json: { source: 'rechain' } }] : [];
@@ -456,6 +469,17 @@ NTFY_GATE_JS = r"""
 const t = $input.first().json;
 return (t && t.total > 0) ? [{ json: t }] : [];
 """
+
+# --- Drain guard: the weekly schedule's first node ---
+DRAIN_GUARD_JS = r"""
+// Tally sets drainActiveAt at the end of every run that re-chains, and clears it
+// when the backlog is done. Only the weekly schedule passes through here, so a
+// re-chained run is never held back; returning [] ends this execution quietly.
+const sd = $getWorkflowStaticData('global');
+const staleMs = __STALE_HOURS__ * 3600000;
+if (sd.drainActiveAt && Date.now() - sd.drainActiveAt < staleMs) return [];
+return $input.all();
+""".replace("__STALE_HOURS__", repr(DRAIN_STALE_HOURS))
 
 OAUTH_CRED_REF = {"oAuth2Api": {"id": OAUTH_CRED_ID, "name": OAUTH_CRED_NAME}}
 RECHAIN_CRED_REF = {"httpHeaderAuth": {"id": RECHAIN_CRED_ID, "name": RECHAIN_CRED_NAME}}
@@ -528,8 +552,11 @@ nodes.append({
     "name": "Weekly schedule",
     "type": "n8n-nodes-base.scheduleTrigger",
     "typeVersion": 1.1,
-    "position": [240, 300],
+    "position": [20, 300],
 })
+
+# 1a. Skip if draining — holds the schedule back while a re-chain drain runs.
+nodes.append(code_node("Skip if draining", "n-drain-guard", DRAIN_GUARD_JS, [240, 300], runOnce=True))
 
 # 1b. Re-chain webhook — second trigger. The workflow POSTs this URL at the end
 # of a full batch to start a fresh execution, draining the backlog over many
@@ -548,16 +575,23 @@ nodes.append({
     "name": "Re-chain webhook",
     "type": "n8n-nodes-base.webhook",
     "typeVersion": 2,
-    "position": [240, 480],
+    "position": [20, 480],
     "webhookId": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
     "credentials": RECHAIN_CRED_REF,
 })
 
 # 2. Constants (as Code node — Set doesn't handle nested objects cleanly)
 constants_js = (
-    "// Clear cross-batch accumulator at start of run\n"
+    "// Start this execution's accumulator. It is keyed by execution id, so a run\n"
+    "// that overlaps another (a manual run during a drain) can neither clear nor\n"
+    "// read the other's tally. Entries a crashed run left behind are pruned.\n"
     "const sd = $getWorkflowStaticData('global');\n"
-    "sd.runResults = [];\n"
+    "delete sd.runResults;  // the shared accumulator used before execution keys\n"
+    "sd.runs = sd.runs || {};\n"
+    "for (const [k, r] of Object.entries(sd.runs)) {\n"
+    "  if (!r || Date.now() - r.startedAt > 2 * 86400000) delete sd.runs[k];\n"
+    "}\n"
+    "sd.runs[$execution.id] = { startedAt: Date.now(), items: [] };\n"
     "return [{ json: " + json.dumps({
         "perRunLimit": PER_RUN_LIMIT,
         "gmailQuery": GMAIL_QUERY,
@@ -914,7 +948,8 @@ nodes.append({
 
 # ===== Connections =====
 connections = {
-    "Weekly schedule": {"main": [[{"node": "Constants", "type": "main", "index": 0}]]},
+    "Weekly schedule": {"main": [[{"node": "Skip if draining", "type": "main", "index": 0}]]},
+    "Skip if draining": {"main": [[{"node": "Constants", "type": "main", "index": 0}]]},
     "Constants": {"main": [
         [{"node": "List labels", "type": "main", "index": 0},
          {"node": "List messages", "type": "main", "index": 0}]
