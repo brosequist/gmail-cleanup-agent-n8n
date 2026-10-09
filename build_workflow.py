@@ -42,9 +42,33 @@ ERROR_WORKFLOW_ID = ""
 # Emails processed per execution before the workflow re-chains itself.
 PER_RUN_LIMIT = 2000
 
-# Gmail search selecting candidate emails. Anything matching this that is not
-# yet stamped with the `LLM Reviewed` label gets classified.
-GMAIL_QUERY = "older_than:30d -label:llm-reviewed"
+# Age gate. Every email is CATEGORISED at any age, but only an email at least
+# TRASH_AGE_DAYS old is TRASH-EVALUATED. A younger email gets its category plus
+# `LLM Categorized` only (a trash verdict is deferred, not acted on), and comes
+# back through the second query arm once it is old enough for a real verdict.
+# rules.md uses age as a signal ("verification codes: KEEP only if recent"), so a
+# verdict computed at day 5 would be wrong at day 30 anyway.
+TRASH_AGE_DAYS = 30
+
+# Categories the model picks DELIBERATELY on a trash verdict, so the label is
+# still applied while the email waits out the age gate (e.g. a "Politics" label
+# you want on mail that will be trashed later). Empty by default: deferred trash
+# otherwise gets NO category, because on a trash verdict the model is usually
+# picking least-bad filler and catch-all labels fill up with noise.
+LABEL_ON_DEFERRED = []
+
+# Control labels (create all three in Gmail before the first run; see README).
+REVIEWED_LABEL      = "LLM Reviewed"      # a trash/keep verdict was acted on
+CATEGORIZED_LABEL   = "LLM Categorized"   # a category decision was made, any age
+NEEDS_REVIEW_LABEL  = "Needs Review"      # kept, but the model gave no usable label
+
+# Gmail search selecting candidate emails: the union of two passes. BOTH arms must
+# be parenthesised: the unparenthesised form `-label:"A" OR (...)` parses but
+# quietly returns the first arm alone, which would disable trashing entirely.
+#   arm 1  uncategorised mail, ANY age            -> categorise
+#   arm 2  old mail without a verdict             -> trash-evaluate
+GMAIL_QUERY = (f'(-label:"{CATEGORIZED_LABEL}") OR '
+               f'(older_than:{TRASH_AGE_DAYS}d -label:"{REVIEWED_LABEL}")')
 
 # Weekly trigger: cron expression + timezone.
 SCHEDULE_CRON = "0 3 * * 6"   # Saturdays at 03:00
@@ -106,7 +130,7 @@ const prompt = `${rules.trim()}
 
 # Available labels
 
-When \`action\` is \`keep\`, give the email its best-matching label from this list in a \`labels\` array. Use label names exactly as written: no nesting, no comma-separated values, no invented names. If \`action\` is \`trash\`, set \`labels\` to an empty array \`[]\`.
+Label EVERY email, including emails you mark \`trash\`, in a \`labels\` array. Use label names from this list exactly as written: no nesting, no comma-separated values, no invented names.
 
 **One label is the default.** Add a SECOND label only when two categories are independently true of the same email: a hotel booking receipt really is both a travel record and a receipt; a vet bill really is both a pet matter and a statement. Never a third.
 
@@ -122,11 +146,11 @@ Return ONLY a JSON object with this exact structure (no prose, no markdown):
 {"decisions": [
   {"id": "...", "action": "keep", "labels": ["Receipts"]},
   {"id": "...", "action": "keep", "labels": ["Travel", "Receipts"]},
-  {"id": "...", "action": "trash", "labels": []}
+  {"id": "...", "action": "trash", "labels": ["Receipts"]}
 ]}
 \`\`\`
 
-The \`decisions\` array must have exactly the same number of entries as input emails, in the same order. Each \`id\` must match an input id. Each \`action\` is either \`"keep"\` or \`"trash"\`. Each \`labels\` is an array of one or two of the labels above when keeping, and \`[]\` when trashing.
+The \`decisions\` array must have exactly the same number of entries as input emails, in the same order. Each \`id\` must match an input id. Each \`action\` is either \`"keep"\` or \`"trash"\`. \`labels\` is ALWAYS required and always an array of one or two names: pick the best-fitting category from the list above even when \`action\` is \`"trash"\`. Never return \`null\` and never an empty array. Emails newer than ${c.trashAgeDays} days are categorised now but only trash-evaluated later, once they age past the threshold, so every email needs a category regardless of its verdict. Judge \`action\` on the email's own merits; do not soften a \`trash\` verdict just because a label is also required.
 
 # Emails to classify
 
@@ -175,9 +199,23 @@ return {
 DECISION_PARSER_JS = r"""
 const resp = $('Ask LLM').first().json;
 const batchInfo = $('Build prompt').first().json;
-const labelIndex = $('Build label index').first().json.labelNameToId;
-const reviewedLabelId = $('Build label index').first().json.reviewedLabelId;
-const validLabels = $('Constants').first().json.validLabels;
+const li = $('Build label index').first().json;
+const labelIndex = li.labelNameToId;
+const { reviewedLabelId, categorizedLabelId, needsReviewLabelId } = li;
+const c = $('Constants').first().json;
+const validLabels = c.validLabels;
+const trashAgeDays = c.trashAgeDays;
+const labelOnDeferred = c.labelOnDeferred || [];
+
+// Age gate: an email may be trash-evaluated only if it is at least trashAgeDays
+// old (>=, so exactly N days is eligible) AND has no verdict yet. Unknown age is
+// never eligible. Younger emails are categorised only; they come back through the
+// older_than arm of gmailQuery once they are old enough.
+const trashEligible = (em) => {
+  const age = em && em.age_days;
+  if (age == null || age < trashAgeDays) return false;
+  return !((em.labelIds || []).includes(reviewedLabelId));
+};
 
 let raw = resp.choices?.[0]?.message?.content || '';
 raw = raw.trim();
@@ -229,43 +267,66 @@ for (const d of decisions) {
     errors.push(`bad action for ${d.id}: ${action}`);
     continue;
   }
-  // Trash takes no category (it is gone at once); anything sent is ignored.
-  let labels = action === 'trash' ? [] : decisionLabels(d);
-  if (action === 'keep') {
-    if (labels.length > MAX_LABELS) {
-      errors.push(`${labels.length} labels for ${d.id}, kept first ${MAX_LABELS}: ${labels.join('/')}`);
-      labels = labels.slice(0, MAX_LABELS);
-    }
-    const unknown = labels.filter(l => !validLabels.includes(l));
-    labels = labels.filter(l => validLabels.includes(l));
-    if (!labels.length) {
-      errors.push(`unknown label for ${d.id}: ${unknown.join('/') || null}`);
-      continue;
-    }
-    if (unknown.length) errors.push(`dropped unknown label(s) for ${d.id}: ${unknown.join('/')}`);
+  // A label is required for BOTH actions, so that a trash verdict on an email too
+  // young to act on still categorises it. A trash verdict with no usable label is
+  // still honoured when eligible: dropping it would turn every trash verdict into
+  // a skip if a model regressed on the label contract.
+  let labels = decisionLabels(d);
+  if (labels.length > MAX_LABELS) {
+    errors.push(`${labels.length} labels for ${d.id}, kept first ${MAX_LABELS}: ${labels.join('/')}`);
+    labels = labels.slice(0, MAX_LABELS);
+  }
+  const unknown = labels.filter(l => !validLabels.includes(l));
+  labels = labels.filter(l => validLabels.includes(l));
+  if (unknown.length) errors.push(`${labels.length ? 'dropped unknown label(s)' : 'unknown label'} for ${d.id}: ${unknown.join('/')}`);
+  if (!labels.length && action === 'keep') {
+    if (!unknown.length) errors.push(`unknown label for ${d.id}: null`);
+    continue;                     // keep with no usable label -> needs review
   }
   seen.add(d.id);
-  const labelIds = labels.map(l => labelIndex[l]).filter(Boolean);
   const em = inputById.get(d.id) || {};
+
+  // Defer, never act on, a trash verdict for an email that is not yet eligible.
+  const eligible = trashEligible(em);
+  const deferred = action === 'trash' && !eligible;
+  const finalAction = deferred ? 'keep' : action;
+  // Deferred trash keeps only labels listed in labelOnDeferred (per label, not per
+  // email); otherwise it gets no category at all, just LLM Categorized.
+  const finalLabels = deferred ? labels.filter(l => labelOnDeferred.includes(l)) : labels;
+  const labelIds = finalLabels.map(l => labelIndex[l]).filter(Boolean);
   plan.push({
     id: d.id,
-    action,
-    labels,
+    action: finalAction,
+    verdict: action,                 // what the model said, for the tally
+    deferred,
+    labels: finalLabels,
     labelIds,
-    label: labels[0] ?? null,        // first label; Route action keys on labelId
+    label: finalLabels[0] ?? null,   // first label; Route action keys on labelId
     labelId: labelIds[0] ?? null,
-    reviewedLabelId,
+    // What a deferred verdict would have labelled, for the tally.
+    suppressedLabel: deferred && !finalLabels.length ? (labels[0] ?? null) : null,
+    age_days: em.age_days ?? null,
+    // LLM Reviewed ONLY when a verdict was acted on (the email was old enough):
+    // stamping a young email would make it permanently trash-exempt.
+    stampReviewed: eligible,
+    reviewedLabelId, categorizedLabelId, needsReviewLabelId,
     sender: em.sender || '',
     subject: em.subject || '',
   });
 }
 
-// Missing IDs default to keep-no-label (safe failure)
+// Missing IDs default to keep-no-label (safe failure) -> the needs-review branch.
 for (const id of inputIds) {
   if (!seen.has(id)) {
     const em = inputById.get(id) || {};
     plan.push({
-      id, action: 'keep', labels: [], labelIds: [], label: null, labelId: null, reviewedLabelId,
+      id, action: 'keep', verdict: null, deferred: false,
+      labels: [], labelIds: [], label: null, labelId: null,
+      age_days: em.age_days ?? null,
+      // Old mail the model keeps failing on is still marked reviewed, so it does
+      // not loop forever; young mail stays open for a later pass.
+      stampReviewed: trashEligible(em),
+      reviewedLabelId, categorizedLabelId, needsReviewLabelId,
       sender: em.sender || '',
       subject: em.subject || '',
     });
@@ -286,16 +347,15 @@ const labels = $json.labels || [];
 const labelNameToId = {};
 for (const l of labels) labelNameToId[l.name] = l.id;
 const c = $('Constants').first().json;
-const REVIEWED = 'LLM Reviewed';
+const control = [c.reviewedLabelName, c.categorizedLabelName, c.needsReviewLabelName];
 
 // Fail loudly, before any message is fetched, if Gmail lacks a label this
 // workflow applies. The workflow never creates labels. Gmail silently accepts
-// addLabelIds:[null] with a 200, so a missing label would no-op every stamp:
-// nothing gets marked LLM Reviewed, the -label:llm-reviewed query never
-// shrinks, and the self-rechaining loop re-processes the same newest mail
-// forever while every run reports success. A missing category label would
-// likewise leave every email in that category unlabelled.
-const needed = [REVIEWED, ...(c.validLabels || [])];
+// addLabelIds:[null] with a 200, so a missing control label would no-op every
+// stamp: nothing gets marked, the query never shrinks, and the self-rechaining
+// loop re-processes the same mail forever while every run reports success. A
+// missing category label would likewise leave that category unlabelled.
+const needed = [...control, ...(c.validLabels || [])];
 const missing = needed.filter((n, i) => needed.indexOf(n) === i && !labelNameToId[n]);
 if (missing.length) {
   throw new Error(
@@ -305,20 +365,30 @@ if (missing.length) {
     'written; see the README) and run again. Nothing was classified.');
 }
 
-const reviewedLabelId = labelNameToId[REVIEWED];
-return [{ json: { labelNameToId, reviewedLabelId, total: labels.length } }];
+return [{ json: {
+  labelNameToId,
+  reviewedLabelId: labelNameToId[c.reviewedLabelName],
+  categorizedLabelId: labelNameToId[c.categorizedLabelName],
+  needsReviewLabelId: labelNameToId[c.needsReviewLabelName],
+  total: labels.length,
+} }];
 """
 
 TALLY_JS = r"""
 const sd = $getWorkflowStaticData('global');
 const items = sd.runResults || [];
 const perRunLimit = $('Constants').first().json.perRunLimit;
-const kept = items.filter(x => x.action === 'keep');
+const allKeeps = items.filter(x => x.action === 'keep');
+const kept = allKeeps.filter(x => !x.deferred);          // real keeps only
+const deferred = items.filter(x => x.deferred);         // trash verdicts waiting on age
 const trashed = items.filter(x => x.action === 'trash');
+// Genuine categorisation failures only (deferred trash has no label by design).
+const uncategorized = kept.filter(x => !x.labelId);
 // An email with two labels counts under both.
 const byLabel = {};
-for (const k of kept) {
-  const ls = (k.labels && k.labels.length) ? k.labels : [k.label || '(no label)'];
+for (const k of allKeeps) {
+  // A deferred item counts only if it kept a labelOnDeferred label.
+  const ls = (k.labels && k.labels.length) ? k.labels : (k.deferred ? [] : [k.label || '(no label)']);
   for (const l of ls) byLabel[l] = (byLabel[l] || 0) + 1;
 }
 const multiLabelled = kept.filter(k => k.labels && k.labels.length > 1).length;
@@ -336,13 +406,17 @@ const moreRemain = idCount >= perRunLimit;
 const statusLine = moreRemain
   ? `Backlog not cleared — re-triggering for the next ${perRunLimit}.`
   : `Backlog cleared — nothing left matching the filter.`;
-const title = `Gmail cleanup: ${kept.length} kept, ${trashed.length} trashed of ${total}`;
+const title = `Gmail cleanup: ${kept.length} kept, ${deferred.length} deferred, ${trashed.length} trashed of ${total}`;
 const body = `Run finished.\nProcessed: ${total}\nKept (labeled): ${kept.length}` +
   (multiLabelled ? ` (${multiLabelled} with 2 labels)` : '') +
-  `\nTrashed: ${trashed.length}\n\nKept by label:\n${labelLines || '  (none)'}\n\n${statusLine}`;
+  `\nDeferred trash (under ${$('Constants').first().json.trashAgeDays} days, re-judged later): ${deferred.length}` +
+  `\nTrashed: ${trashed.length}` +
+  (uncategorized.length ? `\nNeeds Review (no usable label): ${uncategorized.length}` : '') +
+  `\n\nKept by label:\n${labelLines || '  (none)'}\n\n${statusLine}`;
 // Clear for next run
 sd.runResults = [];
-return [{ json: { title, body, total, kept: kept.length, trashed: trashed.length, multiLabelled, moreRemain } }];
+return [{ json: { title, body, total, kept: kept.length, deferred: deferred.length, trashed: trashed.length,
+                  uncategorized: uncategorized.length, multiLabelled, moreRemain } }];
 """
 
 # --- Re-chain gate: emit one item to fire the re-trigger, or nothing to stop ---
@@ -464,6 +538,11 @@ constants_js = (
     "return [{ json: " + json.dumps({
         "perRunLimit": PER_RUN_LIMIT,
         "gmailQuery": GMAIL_QUERY,
+        "trashAgeDays": TRASH_AGE_DAYS,
+        "labelOnDeferred": LABEL_ON_DEFERRED,
+        "reviewedLabelName": REVIEWED_LABEL,
+        "categorizedLabelName": CATEGORIZED_LABEL,
+        "needsReviewLabelName": NEEDS_REVIEW_LABEL,
         "model": LLM_MODEL,
         "llmApiUrl": LLM_API_URL,
         "disableThinking": LLM_DISABLE_THINKING,
@@ -638,7 +717,11 @@ nodes.append({
         "sendBody": True,
         "contentType": "json",
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ addLabelIds: [$('Build label index').first().json.reviewedLabelId] }) }}",
+        # A trashed email was by definition eligible, so it gets both stamps.
+        "jsonBody": "={{ JSON.stringify({ addLabelIds: ["
+                    "$('Build label index').first().json.reviewedLabelId, "
+                    "$('Build label index').first().json.categorizedLabelId"
+                    "].filter(Boolean) }) }}",
         "options": {"timeout": 30000, "response": {"response": {"responseFormat": "json"}}},
     },
     "id": "n-reviewed-trash",
@@ -664,7 +747,12 @@ nodes.append({
         "sendBody": True,
         "contentType": "json",
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ addLabelIds: [...($json.labelIds || [$json.labelId]), $json.reviewedLabelId] }) }}",
+        # Category label(s) + LLM Categorized always; LLM Reviewed ONLY when the
+        # email was old enough for its verdict to be acted on.
+        "jsonBody": "={{ JSON.stringify({ addLabelIds: "
+                    "[...($json.labelIds || [$json.labelId]), $json.categorizedLabelId]"
+                    ".concat($json.stampReviewed ? [$json.reviewedLabelId] : [])"
+                    ".filter(Boolean) }) }}",
         "options": {"timeout": 30000, "response": {"response": {"responseFormat": "json"}}},
     },
     "id": "n-modify",
@@ -679,8 +767,12 @@ nodes.append({
     "onError": "continueRegularOutput",
 })
 
-# 14c. Skip branch — kept by LLM but no valid label resolved. Apply Reviewed
-# so future runs don't re-evaluate the same email indefinitely.
+# 14c. No-category branch. Two populations land here:
+#   (a) deferred trash: young, verdict withheld, filler label suppressed
+#   (b) genuine failures: kept, but the model gave no usable label
+# Both get LLM Categorized so the categorisation arm stops returning them; only
+# (b) gets Needs Review (a deferred email is working as designed, and flagging it
+# would bury the real failures). LLM Reviewed only when old enough, as elsewhere.
 nodes.append({
     "parameters": {
         "method": "POST",
@@ -690,11 +782,14 @@ nodes.append({
         "sendBody": True,
         "contentType": "json",
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ addLabelIds: [$json.reviewedLabelId] }) }}",
+        "jsonBody": "={{ JSON.stringify({ addLabelIds: [$json.categorizedLabelId]"
+                    ".concat($json.deferred ? [] : [$json.needsReviewLabelId])"
+                    ".concat($json.stampReviewed ? [$json.reviewedLabelId] : [])"
+                    ".filter(Boolean) }) }}",
         "options": {"timeout": 30000, "response": {"response": {"responseFormat": "json"}}},
     },
     "id": "n-reviewed-skip",
-    "name": "Mark reviewed (skip)",
+    "name": "Mark needs-review",
     "type": "n8n-nodes-base.httpRequest",
     "typeVersion": 4.2,
     "position": [2660, 600],
@@ -807,12 +902,12 @@ connections = {
     "Route action": {"main": [
         [{"node": "Trash message", "type": "main", "index": 0}],
         [{"node": "Add label", "type": "main", "index": 0}],
-        [{"node": "Mark reviewed (skip)", "type": "main", "index": 0}],
+        [{"node": "Mark needs-review", "type": "main", "index": 0}],
     ]},
     "Trash message": {"main": [[{"node": "Mark reviewed (post-trash)", "type": "main", "index": 0}]]},
     "Mark reviewed (post-trash)": {"main": [[{"node": "Merge actions", "type": "main", "index": 0}]]},
     "Add label": {"main": [[{"node": "Merge actions", "type": "main", "index": 0}]]},
-    "Mark reviewed (skip)": {"main": [[{"node": "Merge actions", "type": "main", "index": 0}]]},
+    "Mark needs-review": {"main": [[{"node": "Merge actions", "type": "main", "index": 0}]]},
     "Merge actions": {"main": [[{"node": "Batch (20)", "type": "main", "index": 0}]]},
     "Tally": {"main": [[
         {"node": "ntfy gate", "type": "main", "index": 0},
