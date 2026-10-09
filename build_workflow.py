@@ -25,6 +25,15 @@ N8N_BASE_URL = "http://localhost:5678"
 LLM_API_URL = "http://localhost:11434/v1/chat/completions"
 LLM_MODEL   = "qwen3"
 
+# Set True for an endpoint that needs an API key (the OpenAI API, most hosted
+# providers). Ask LLM then authenticates with an n8n "Header Auth" credential,
+# which you create after import with Name `Authorization` and Value
+# `Bearer <your key>`, so the key never appears in this file or the JSON.
+# Local endpoints (Ollama, llama.cpp) need no key: leave False.
+LLM_USE_API_KEY = False
+LLM_CRED_ID     = "REPLACE_WITH_YOUR_LLM_API_KEY_CREDENTIAL_ID"
+LLM_CRED_NAME   = "LLM API key"
+
 # Send chat_template_kwargs {enable_thinking: false} with every request. Reasoning
 # models (qwen3 and similar) otherwise spend the whole token budget "thinking" and
 # return EMPTY content with finish_reason "length". Ollama, llama.cpp and vLLM
@@ -661,6 +670,10 @@ nodes.append({
     "maxTries": 3,
     "waitBetweenTries": 5000,
 })
+if LLM_USE_API_KEY:
+    nodes[-1]["parameters"].update(
+        {"authentication": "genericCredentialType", "genericAuthType": "httpHeaderAuth"})
+    nodes[-1]["credentials"] = {"httpHeaderAuth": {"id": LLM_CRED_ID, "name": LLM_CRED_NAME}}
 
 # 12. Parse decisions
 nodes.append(code_node("Parse decisions", "n-parse-dec", DECISION_PARSER_JS, [2220, 400], runOnce=True))

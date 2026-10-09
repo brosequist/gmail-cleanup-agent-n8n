@@ -264,6 +264,27 @@ def test_credentials_are_placeholders_not_real_ids():
     )
 
 
+def test_ask_llm_sends_no_credential_by_default():
+    node = NODES["Ask LLM"]
+    assert "credentials" not in node
+    assert "authentication" not in node["parameters"]
+
+
+def test_llm_api_key_uses_its_own_header_auth_credential(tmp_path):
+    """Keyed endpoints (the OpenAI API) 401'd: Ask LLM sent no Authorization
+    header. LLM_USE_API_KEY switches it to a Header Auth credential, a separate
+    placeholder from the Gmail one so picking either never rewires the other."""
+    wf = _build_variant(tmp_path, LLM_USE_API_KEY=True)
+    node = next(n for n in wf["nodes"] if n["name"] == "Ask LLM")
+    assert node["parameters"]["authentication"] == "genericCredentialType"
+    assert node["parameters"]["genericAuthType"] == "httpHeaderAuth"
+    assert node["credentials"] == {"httpHeaderAuth": {
+        "id": "REPLACE_WITH_YOUR_LLM_API_KEY_CREDENTIAL_ID", "name": "LLM API key"}}
+    # Nothing else changes.
+    others = [n for n in wf["nodes"] if n["name"] != "Ask LLM"]
+    assert others == [n for n in WORKFLOW["nodes"] if n["name"] != "Ask LLM"]
+
+
 # ─── Workflow settings ───────────────────────────────────────────────────────
 
 def test_settings_are_sane():
