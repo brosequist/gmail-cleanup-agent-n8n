@@ -1,11 +1,13 @@
 # Label catalog used by the classifier.
 #
 # `existing` — labels that already exist in your Gmail. The classifier
-#              will use these where applicable but won't create them.
-# `auto_create` — categories you want for important emails. The classifier
-#              will create these labels in your Gmail the first time
-#              they're applied. Each entry has a one-line description
-#              that goes into the LLM prompt to guide classification.
+#              will use these where applicable.
+# `auto_create` — categories you want for important emails. Each entry has a
+#              one-line description that goes into the LLM prompt to guide
+#              classification. The name is shared with the companion Python
+#              agent, which creates these labels; this n8n workflow does NOT.
+#              Create every label in this file in Gmail before the first run,
+#              or the run stops with an error listing the missing ones.
 
 existing:
   - Taxes
